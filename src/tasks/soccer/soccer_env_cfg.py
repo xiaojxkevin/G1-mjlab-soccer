@@ -10,6 +10,8 @@ Two task variants are created from this factory:
 
 import math
 
+import mujoco
+
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.action_manager import ActionTermCfg
@@ -20,13 +22,37 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
-from mjlab.tasks.velocity import mdp
-from mjlab.terrains import TerrainEntityCfg
+from src.tasks.soccer import mdp
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 from src.tasks.soccer.ball import get_ball_cfg
 from src.tasks.soccer.goal import get_goal_cfg
+from src.tasks.soccer.ground import get_ground_cfg
+from src.tasks.soccer.config.soccer_settings import SETTINGS
+
+
+def _add_soccer_scene_postproc(spec: mujoco.MjSpec) -> None:
+  """Post-process the root MjSpec to add skybox and visual settings.
+
+  Called by the Scene after all entities are attached. This ensures global
+  visual elements (skybox, haze, lighting) are applied at the root level.
+  """
+  spec.add_texture(
+    name="skybox",
+    type=mujoco.mjtTexture.mjTEXTURE_SKYBOX,
+    builtin=mujoco.mjtBuiltin.mjBUILTIN_GRADIENT,
+    rgb1=(0.3, 0.5, 0.7),
+    rgb2=(0.0, 0.0, 0.0),
+    width=512,
+    height=3072,
+  )
+  spec.visual.headlight.diffuse = (0.6, 0.6, 0.6)
+  spec.visual.headlight.ambient = (0.3, 0.3, 0.3)
+  spec.visual.headlight.specular = (0.0, 0.0, 0.0)
+  spec.visual.rgba.haze = (0.15, 0.25, 0.35, 1.0)
+  spec.visual.global_.azimuth = 120.0
+  spec.visual.global_.elevation = -20.0
 
 
 def make_soccer_env_cfg() -> ManagerBasedRlEnvCfg:
@@ -165,12 +191,13 @@ def make_soccer_env_cfg() -> ManagerBasedRlEnvCfg:
 
   return ManagerBasedRlEnvCfg(
     scene=SceneCfg(
-      terrain=TerrainEntityCfg(terrain_type="plane"),
       entities={
+        "ground": get_ground_cfg(),
         "ball": get_ball_cfg(),
         "goal": get_goal_cfg(),
       },
       num_envs=1,
+      spec_fn=_add_soccer_scene_postproc,
     ),
     observations=observations,
     actions=actions,
@@ -196,5 +223,5 @@ def make_soccer_env_cfg() -> ManagerBasedRlEnvCfg:
       ),
     ),
     decimation=4,
-    episode_length_s=5.0,
+    episode_length_s=SETTINGS.episode_length_s,
   )

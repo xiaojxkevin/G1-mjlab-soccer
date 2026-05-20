@@ -1,0 +1,50 @@
+# Soccer Environment Settings
+# ==========================
+# Single source of truth for key soccer-specific parameters.
+# All code should reference these values (via soccer_settings.py).
+
+# Ball parameters (Size 4 football: radius 0.10m, mass 0.35kg).
+ball:
+  radius: 0.10 # m — Size 4 football
+  mass: 0.35 # kg
+  # Solid sphere inertia: I = 2/5 * m * r^2
+  inertia: [0.0014, 0.0014, 0.0014, 0, 0, 0]
+  # Air drag (applied per-step via MuJoCo fluid model).
+  air_drag:
+    enabled: true
+    fluid_coef: 0.10 # MuJoCo fluidshape coefficient (ellipsoid drag)
+
+# Goal dimensions.
+goal:
+  width: 3.0 # m — inner width between posts
+  height: 1.8 # m — inner height (crossbar)
+
+# Penalty spot.
+penalty_spot:
+  distance_from_goal: 4.0 # m — ball-to-goal line distance in x
+
+# Scene layout (world-frame positions).
+scene:
+  goal_pos: [0.0, 0.0, 0.0]
+  ball_pos: [-4.0, 0.0, 0.10]  # x = -penalty_spot.distance_from_goal
+  shooter_pos: [-4.5, 0.0, 0.8]
+  goalkeeper_pos: [0.0, 0.0, 0.8]
+
+# Ground contact (shooter reference: restitution 0.8 via solref damping).
+ground:
+  solref: [0.02, 0.07] # timeconst=0.02, dampratio=0.07 → e≈0.8
+  solimp: [0.9, 0.95, 0.001, 0.5, 2]
+  friction: [1.0, 1.0] # static, dynamic — matches shooter reference
+
+# Goalkeeper ball launch velocity randomization.
+# Yaw spread is computed from goal width, goal_margin, and ball distance:
+#   yaw_spread = atan((goal_width/2 - goal_margin) / penalty_distance)
+goalkeeper_ball_vel:
+  speed_min: 2.0     # m/s
+  speed_max: 4.5     # m/s
+  pitch_min_deg: 3.0 # degrees — minimum loft angle
+  pitch_max_deg: 8.0 # degrees — maximum loft angle
+  goal_margin: 0.2   # m — keep ball at least this far inside each post
+
+# Episode timeout.
+episode_length_s: 10.0

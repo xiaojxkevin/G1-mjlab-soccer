@@ -13,8 +13,15 @@ from src.assets.robots.unitree_g1.g1_constants import (
 from mjlab.entity import EntityCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from src.tasks.soccer.soccer_env_cfg import make_soccer_env_cfg
+from src.tasks.soccer.config.soccer_settings import SETTINGS
+from src.tasks.soccer.mdp import (
+  GoalkeeperBallVelCfg,
+  reset_ball_with_goal_velocity,
+)
 
 import math
 
@@ -54,7 +61,7 @@ def _setup_robot_env(cfg: ManagerBasedRlEnvCfg) -> None:
       pattern=r"^(left_ankle_roll_link|right_ankle_roll_link)$",
       entity="robot",
     ),
-    secondary=ContactMatch(mode="body", pattern="terrain"),
+    secondary=ContactMatch(mode="subtree", pattern="ground", entity="ground"),
     fields=("found", "force"),
     reduce="netforce",
     num_slots=1,
@@ -79,10 +86,9 @@ def unitree_g1_shooter_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   """Unitree G1 naive shooter: robot at penalty spot facing goal, ball in front."""
   cfg = make_soccer_env_cfg()
 
-  robot_pos = (-6.2, 0.0, 0.8)
-  robot_yaw = 0.0  # Facing +x toward goal
-  cfg.scene.entities["robot"] = _g1_robot_at(robot_pos, robot_yaw)
-  cfg.scene.entities["ball"].init_state.pos = (-6.0, 0.0, 0.11)
+  s = SETTINGS.scene
+  cfg.scene.entities["robot"] = _g1_robot_at(tuple(s.shooter_pos), 0.0)
+  cfg.scene.entities["ball"].init_state.pos = tuple(s.ball_pos)
 
   _setup_robot_env(cfg)
 
@@ -94,15 +100,39 @@ def unitree_g1_shooter_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
 
 def unitree_g1_goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """Unitree G1 naive goalkeeper: robot at goal line facing incoming ball."""
+  """Unitree G1 naive goalkeeper: robot at goal line facing incoming ball.
+
+  Ball velocity is randomized each reset.  Yaw spread is computed from
+  goal dimensions and ball distance so shots stay within the goal frame
+  (minus goal_margin on each side).
+  """
   cfg = make_soccer_env_cfg()
 
-  robot_pos = (0.0, 0.0, 0.8)
-  robot_yaw = math.pi  # Facing -x toward ball/penalty spot
-  cfg.scene.entities["robot"] = _g1_robot_at(robot_pos, robot_yaw)
-  cfg.scene.entities["ball"].init_state.pos = (-6.0, 0.0, 0.11)
-  # Initial velocity 1 m/s toward goal center (ball travels ~6s to reach goal).
-  cfg.scene.entities["ball"].init_state.lin_vel = (0.99, 0.0, 0.13)
+  s = SETTINGS.scene
+  cfg.scene.entities["robot"] = _g1_robot_at(tuple(s.goalkeeper_pos), math.pi)
+  cfg.scene.entities["ball"].init_state.pos = tuple(s.ball_pos)
+
+  gv = SETTINGS.goalkeeper_ball_vel
+  penalty_dist = abs(SETTINGS.scene.ball_pos[0])  # distance to goal line
+
+  # Yaw spread: the ball direction should stay within the goal frame.
+  effective_half_width = SETTINGS.goal.width / 2 - gv.goal_margin
+  yaw_spread_deg = math.degrees(math.atan(effective_half_width / penalty_dist))
+
+  cfg.events["reset_ball"] = EventTermCfg(
+    func=reset_ball_with_goal_velocity,
+    mode="reset",
+    params={
+      "vel_cfg": GoalkeeperBallVelCfg(
+        speed_min=gv.speed_min,
+        speed_max=gv.speed_max,
+        yaw_spread_deg=yaw_spread_deg,
+        pitch_min_deg=gv.pitch_min_deg,
+        pitch_max_deg=gv.pitch_max_deg,
+      ),
+      "ball_cfg": SceneEntityCfg("ball"),
+    },
+  )
 
   _setup_robot_env(cfg)
 
