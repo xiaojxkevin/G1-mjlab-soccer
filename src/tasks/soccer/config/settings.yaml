@@ -24,14 +24,19 @@ penalty_spot:
   distance_from_goal: 4.0 # m — ball-to-goal line distance in x
 
 # Scene layout (world-frame positions).
-# ball_pos and shooter_pos are derived from penalty_spot.distance_from_goal;
-# they are listed here as comments for reference only.
-#   ball_pos:    [-distance, 0, ball.radius]
-#   shooter_pos: [-distance - shooter_behind_ball, 0, 0.8]
+# ball_pos and shooter_pos are derived from penalty_spot.distance_from_goal.
 scene:
   goal_pos: [0.0, 0.0, 0.0]
   goalkeeper_pos: [0.0, 0.0, 0.8]
   shooter_behind_ball: 1.0  # m — shooter stands this far behind the ball (avoid foot/ball collision at reset)
+  # Motion data is recorded near origin (robot pelvis ~(0.12,-0.11,0.82),
+  # facing -y). These offsets map motion-frame coordinates to world-frame:
+  #   world_xy = motion_xy + motion_origin_offset.xy
+  #   world_yaw = motion_yaw + motion_yaw_offset
+  # The defaults place the robot at ~(-5, 0) facing +x (toward goal at origin).
+  # Use a slightly negative x offset to keep the robot behind the ball at (-4,0).
+  motion_origin_offset: [-5.6, 0.0, 0.0]
+  motion_yaw_offset: 1.5708  # +pi/2 rad
 
 # Ground contact (shooter reference: restitution 0.8 via solref damping).
 ground:

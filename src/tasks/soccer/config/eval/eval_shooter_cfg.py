@@ -1,74 +1,125 @@
 """Shooter evaluation config — matches HumanoidSoccer paper observation space.
 
-Observation space (matching paper Eq.1, Section III-A):
+Observation order matches Stage II training so trained checkpoints load directly.
 
   o_t = (o^prop_t, o^ref_t, o^soc_t)
 
-  o^prop_t (93D proprioception):
-    - projected_gravity (3D)
-    - base_ang_vel      (3D)
-    - joint_pos_rel     (29D)
-    - joint_vel_rel     (29D)
-    - last_action       (29D)
+  Actor (160D, same term order as Unitree-G1-Shooter-Stage2):
+    command (58) → projected_gravity (3) → motion_ref_ang_vel (3) →
+    base_ang_vel (3) → joint_pos (29) → joint_vel (29) → actions (29) →
+    target_point_pos (3) → target_destination_pos (3)
 
-  o^ref_t (61D motion tracking reference):
-    - motion_ref_joint_pos      (29D) — reference joint positions at current frame
-    - motion_ref_joint_vel      (29D) — reference joint velocities at current frame
-    - motion_ref_anchor_ang_vel (3D)  — reference anchor angular velocity
+Scene: physical goal + ball at penalty spot + ground (robot added by G1 wrapper).
 
-  o^soc_t (6D soccer perception):
-    - target_point_pos       (3D) — ball position in robot pelvis frame
-    - target_destination_pos (3D) — goal center in robot pelvis frame
-
-  Total actor:  93 + 61 + 6 = 160D
-  Total critic: 96 + 61 + 6 = 163D (adds base_lin_vel)
-
-Domain randomization (eval only — no sim2real):
-  - Robot root pos: ±0.5m xy circle behind the ball (reset)
-  - Robot root yaw: ±0.2 rad (reset)
-  - Joint default pos: ±0.01 rad (reset)
-
-Observation noise: disabled (paper eval protocol).
+Eval design (matching paper §IV-B):
+  - Goal and ball are FIXED (penalty kick scenario).
+  - Motion command sets the G1 to the motion's frame-0 pose, then applies
+    random position offset (±0.5m xy) and yaw rotation (±0.5 rad) on every reset.
+  - The policy must track the motion reference while adjusting to kick the
+    stationary ball at (-4, 0, 0.11).
+  - 100 trials with different seeds → Success Rate = % of balls entering goal.
 """
+
+import math
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.managers.termination_manager import TerminationTermCfg
-from src.tasks.soccer.config.g1.env_cfgs import unitree_g1_shooter_env_cfg
-from src.tasks.soccer.config.soccer_settings import SETTINGS
-from src.tasks.soccer import mdp as soccer_mdp
+from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
-# Goal center world-frame position (center of goal opening).
-_GOAL_CENTER = (0.0, 0.0, SETTINGS.goal.height / 2)  # (0, 0, 0.9)
-_BALL_CFG = SceneEntityCfg("ball")
-_ROBOT_JOINT_CFG = SceneEntityCfg("robot", joint_names=(".*",))
+from src.tasks.soccer import mdp as soccer_mdp
+from src.tasks.soccer.ball import get_ball_cfg
+from src.tasks.soccer.goal import get_goal_cfg
+from src.tasks.soccer.ground import get_ground_cfg
+from src.tasks.soccer.config.soccer_settings import SETTINGS
+from src.tasks.soccer.soccer_env_cfg import _add_soccer_scene_postproc
+from src.tasks.soccer.mdp.commands import MultiMotionSoccerCommandCfg
+from src.tasks.soccer.mdp.training_obs import (
+  constant_target_point_pos,
+  motion_anchor_ang_vel,
+  target_destination_pos_local,
+)
+from src.tasks.soccer.mdp.training_obs import (
+  motion_anchor_pos_b,
+  motion_anchor_ori_b,
+  robot_body_pos_b,
+  robot_body_ori_b,
+)
+
+from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.managers.action_manager import ActionTermCfg
+from mjlab.scene import SceneCfg
+from mjlab.sim import MujocoCfg, SimulationCfg
+from mjlab.viewer import ViewerConfig
+
+# Body names matching training configs.
+_TRACKING_BODY_NAMES = (
+  "pelvis",
+  "left_hip_roll_link", "left_knee_link", "left_ankle_roll_link",
+  "right_hip_roll_link", "right_knee_link", "right_ankle_roll_link",
+  "torso_link",
+  "left_shoulder_roll_link", "left_elbow_link", "left_wrist_yaw_link",
+  "right_shoulder_roll_link", "right_elbow_link", "right_wrist_yaw_link",
+)
+
+_EVAL_XY_RANGE = 0.5   # ±m — lateral randomization
+_EVAL_YAW_RANGE = 0.5  # ±rad — yaw randomization
 
 
 def eval_shooter_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """Shooter evaluation config matching HumanoidSoccer paper.
+  """Shooter eval config — Stage II-compatible obs ordering.
 
-  Observation space:
-    actor  = proprioception(93) + motion_ref(61) + soccer(6) = 160D
-    critic = actor(160) + base_lin_vel(3) = 163D
-
-  Domain randomization (eval only):
-    - Robot root pos: random within 0.5m radius circle behind ball
-    - Robot root yaw: ±0.2 rad
-    - Joint default pos: ±0.01 rad
-
-  Ball position is fixed (per settings.yaml).
+  Two-phase robot placement:
+  1. Command (uniform mode): places G1 at motion frame 0 + small xy/yaw noise.
+  2. shift_root_pose event: applies global offset from settings to move the
+     robot from motion origin to world position behind the penalty spot.
+  Ball is fixed at penalty spot via fixed_ball_pos.
   """
-  cfg = unitree_g1_shooter_env_cfg(play=play)
+  s = SETTINGS.scene
+  ox, oy, oz = s.motion_origin_offset
 
-  ##
-  # Rebuild actor observations — match paper.
-  ##
+  # -- Commands: motion places G1 near origin + random noise, then shifts ------
+  # -- to world position via motion_origin_offset / motion_yaw_offset. ----------
 
-  # O^prop_t: proprioception (93D).
-  actor_prop_terms = {
+  commands = {
+    "motion": MultiMotionSoccerCommandCfg(
+      motion_dir="",
+      anchor_body_name="torso_link",
+      body_names=_TRACKING_BODY_NAMES,
+      entity_name="robot",
+      ball_entity_name="ball",
+      resampling_time_range=(1e9, 1e9),
+      pose_range={
+        "x": (-_EVAL_XY_RANGE, _EVAL_XY_RANGE),
+        "y": (-_EVAL_XY_RANGE, _EVAL_XY_RANGE),
+        "z": (0.0, 0.0),
+        "roll": (0.0, 0.0),
+        "pitch": (0.0, 0.0),
+        "yaw": (-_EVAL_YAW_RANGE, _EVAL_YAW_RANGE),
+      },
+      velocity_range={},
+      joint_position_range=(-0.0, 0.0),
+      sampling_mode="uniform",
+      fixed_ball_pos=tuple(s.ball_pos),
+      motion_origin_offset=(ox, oy, oz),
+      motion_yaw_offset=s.motion_yaw_offset,
+      debug_vis=False,
+    ),
+  }
+
+  # -- Observations (same order as Stage II) -----------------------------------
+
+  actor_terms = {
+    "command": ObservationTermCfg(
+      func=soccer_mdp.generated_commands,
+      params={"command_name": "motion"},
+    ),
     "projected_gravity": ObservationTermCfg(func=soccer_mdp.projected_gravity),
+    "motion_ref_ang_vel": ObservationTermCfg(
+      func=motion_anchor_ang_vel,
+      params={"command_name": "motion"},
+    ),
     "base_ang_vel": ObservationTermCfg(
       func=soccer_mdp.builtin_sensor,
       params={"sensor_name": "robot/imu_ang_vel"},
@@ -76,115 +127,137 @@ def eval_shooter_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     "joint_pos": ObservationTermCfg(func=soccer_mdp.joint_pos_rel),
     "joint_vel": ObservationTermCfg(func=soccer_mdp.joint_vel_rel),
     "actions": ObservationTermCfg(func=soccer_mdp.last_action),
-  }
-
-  # O^ref_t: motion tracking reference (61D).
-  actor_ref_terms = {
-    "motion_ref_joint_pos": ObservationTermCfg(func=soccer_mdp.motion_ref_joint_pos),
-    "motion_ref_joint_vel": ObservationTermCfg(func=soccer_mdp.motion_ref_joint_vel),
-    "motion_ref_anchor_ang_vel": ObservationTermCfg(func=soccer_mdp.motion_ref_anchor_ang_vel),
-  }
-
-  # O^soc_t: soccer perception (6D).
-  actor_soc_terms = {
     "target_point_pos": ObservationTermCfg(
-      func=soccer_mdp.ball_pos_in_robot_frame,
-      params={"ball_cfg": _BALL_CFG},
+      func=constant_target_point_pos,
+      params={"command_name": "motion"},
     ),
     "target_destination_pos": ObservationTermCfg(
-      func=soccer_mdp.world_point_in_robot_frame,
-      params={"point": _GOAL_CENTER},
+      func=target_destination_pos_local,
+      params={"command_name": "motion"},
     ),
   }
 
-  all_actor_terms = {**actor_prop_terms, **actor_ref_terms, **actor_soc_terms}
-
-  cfg.observations["actor"] = ObservationGroupCfg(
-    terms=all_actor_terms,
-    concatenate_terms=True,
-    enable_corruption=False,  # paper eval protocol: no observation noise
-    history_length=1,
-  )
-
-  # O critic = actor + base_lin_vel.
-  all_critic_terms = {
-    **all_actor_terms,
+  critic_terms = {
+    **actor_terms,
+    "motion_anchor_pos_b": ObservationTermCfg(
+      func=motion_anchor_pos_b,
+      params={"command_name": "motion"},
+    ),
+    "motion_anchor_ori_b": ObservationTermCfg(
+      func=motion_anchor_ori_b,
+      params={"command_name": "motion"},
+    ),
+    "body_pos": ObservationTermCfg(
+      func=robot_body_pos_b,
+      params={"command_name": "motion"},
+    ),
+    "body_ori": ObservationTermCfg(
+      func=robot_body_ori_b,
+      params={"command_name": "motion"},
+    ),
     "base_lin_vel": ObservationTermCfg(
       func=soccer_mdp.builtin_sensor,
       params={"sensor_name": "robot/imu_lin_vel"},
     ),
   }
-  cfg.observations["critic"] = ObservationGroupCfg(
-    terms=all_critic_terms,
-    concatenate_terms=True,
-    enable_corruption=False,
-    history_length=1,
-  )
 
-  ##
-  # Domain randomization (eval only — no sim2real physics DR).
-  ##
+  observations = {
+    "actor": ObservationGroupCfg(
+      terms=actor_terms,
+      concatenate_terms=True,
+      enable_corruption=False,
+      history_length=1,
+    ),
+    "critic": ObservationGroupCfg(
+      terms=critic_terms,
+      concatenate_terms=True,
+      enable_corruption=False,
+      history_length=1,
+    ),
+  }
 
-  # Robot root pos: random behind ball.  x only backward (ball is at +x from robot),
-  # so robot stays at least shooter_behind_ball (1.0m) from the ball surface.
-  cfg.events["reset_robot_base"] = EventTermCfg(
-    func=soccer_mdp.reset_root_state_uniform,
-    mode="reset",
-    params={
-      "pose_range": {
-        "x": (-0.5, 0.0),   # only backward (ball at +x direction)
-        "y": (-0.5, 0.5),   # lateral
-        "z": (0.0, 0.0),
-        "roll": (0.0, 0.0),
-        "pitch": (0.0, 0.0),
-        "yaw": (-0.5, 0.5), # ±0.5 rad
+  # -- Actions ----------------------------------------------------------------
+
+  actions: dict[str, ActionTermCfg] = {
+    "joint_pos": JointPositionActionCfg(
+      entity_name="robot",
+      actuator_names=(".*",),
+      scale=0.25,
+      use_default_offset=True,
+    )
+  }
+
+  # -- Events: joint offset reset only (G1/ball placement handled by command) -----
+
+  events = {
+    "reset_robot_joints": EventTermCfg(
+      func=soccer_mdp.reset_joints_by_offset,
+      mode="reset",
+      params={
+        "position_range": (-0.0, 0.0),
+        "velocity_range": (-0.0, 0.0),
+        "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
       },
-      "velocity_range": {},
-    },
+    ),
+  }
+
+  # -- Terminations (timeout + fell_over only) --------------------------------
+
+  from mjlab.managers.termination_manager import TerminationTermCfg
+
+  terminations = {
+    "time_out": TerminationTermCfg(func=soccer_mdp.time_out, time_out=True),
+    "fell_over": TerminationTermCfg(
+      func=soccer_mdp.bad_orientation,
+      params={"limit_angle": math.radians(70.0)},
+    ),
+  }
+
+  # -- Rewards (eval only) ----------------------------------------------------
+
+  from mjlab.managers.reward_manager import RewardTermCfg
+
+  rewards = {
+    "is_terminated": RewardTermCfg(func=soccer_mdp.is_terminated, weight=-200.0),
+  }
+
+  # -- Assemble ---------------------------------------------------------------
+
+  ep_len = int(1e9) if play else SETTINGS.episode_length_s
+
+  return ManagerBasedRlEnvCfg(
+    scene=SceneCfg(
+      entities={
+        "ground": get_ground_cfg(),
+        "ball": get_ball_cfg(pos=tuple(s.ball_pos)),
+        "goal": get_goal_cfg(),
+      },
+      num_envs=1,
+      spec_fn=_add_soccer_scene_postproc,
+    ),
+    observations=observations,
+    actions=actions,
+    commands=commands,
+    events=events,
+    rewards=rewards,
+    terminations=terminations,
+    viewer=ViewerConfig(
+      origin_type=ViewerConfig.OriginType.ASSET_BODY,
+      entity_name="robot",
+      body_name="torso_link",
+      distance=6.0,
+      elevation=-10.0,
+      azimuth=90.0,
+    ),
+    sim=SimulationCfg(
+      nconmax=48,
+      njmax=1500,
+      mujoco=MujocoCfg(
+        timestep=0.005,
+        iterations=10,
+        ls_iterations=20,
+      ),
+    ),
+    decimation=4,
+    episode_length_s=ep_len,
   )
-
-  # Randomize joint default positions on every reset (±0.01 rad).
-  cfg.events["reset_robot_joints"] = EventTermCfg(
-    func=soccer_mdp.reset_joints_by_offset,
-    mode="reset",
-    params={
-      "position_range": (-0.01, 0.01),
-      "velocity_range": (-0.0, 0.0),
-      "asset_cfg": _ROBOT_JOINT_CFG,
-    },
-  )
-
-  # Ball reset: fixed position (no velocity), per settings.yaml.
-  cfg.events["reset_ball"] = EventTermCfg(
-    func=soccer_mdp.reset_root_state_uniform,
-    mode="reset",
-    params={
-      "pose_range": {},
-      "velocity_range": {},
-      "asset_cfg": _BALL_CFG,
-    },
-  )
-
-  # Remove push_robot interval DR (sim2real only).
-  cfg.events.pop("push_robot", None)
-
-  ##
-  # Terminations — paper's motion-tracking safety constraints.
-  # Disabled by default (too strict for zero-agent baseline).
-  # Uncomment to enable when training a tracking policy.
-  ##
-
-  # cfg.terminations["anchor_pos_z"] = TerminationTermCfg(
-  #   func=soccer_mdp.bad_anchor_pos_z,
-  #   params={"threshold": 0.25},
-  # )
-  # cfg.terminations["anchor_ori"] = TerminationTermCfg(
-  #   func=soccer_mdp.bad_anchor_ori,
-  #   params={"threshold": 0.8},
-  # )
-  # cfg.terminations["ee_body_pos"] = TerminationTermCfg(
-  #   func=soccer_mdp.bad_ee_body_pos_z,
-  #   params={"threshold": 0.25},
-  # )
-
-  return cfg

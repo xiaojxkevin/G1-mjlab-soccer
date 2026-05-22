@@ -13,6 +13,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
+from src.tasks.soccer.mdp.commands import MultiMotionSoccerCommandCfg
 from mjlab.utils.os import get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
@@ -24,6 +25,7 @@ class PlayConfig:
   agent: Literal["zero", "random", "trained"] = "trained"
   checkpoint_file: str | None = None
   motion_file: str | None = None
+  motion_dir: str | None = None
   num_envs: int | None = None
   device: str | None = None
   video: bool = False
@@ -81,6 +83,24 @@ def run_play(task_id: str, cfg: PlayConfig):
           "  --motion-file /path/to/motion.npz (local file)\n"
           "  --registry-name your-org/motions/motion-name (download from WandB)"
         )
+
+  # Check for soccer training tasks (MultiMotionSoccerCommand).
+  is_soccer_task = "motion" in env_cfg.commands and isinstance(
+    env_cfg.commands["motion"], MultiMotionSoccerCommandCfg
+  )
+
+  if is_soccer_task:
+    motion_cmd = env_cfg.commands["motion"]
+    assert isinstance(motion_cmd, MultiMotionSoccerCommandCfg)
+    if cfg.motion_dir is not None:
+      motion_dir = Path(cfg.motion_dir).expanduser().resolve()
+      if motion_dir.exists():
+        motion_cmd.motion_dir = str(motion_dir)
+        print(f"[INFO]: Using motion directory: {motion_cmd.motion_dir}")
+    if DUMMY_MODE and not motion_cmd.motion_dir:
+      raise ValueError(
+        "Soccer training tasks require --motion-dir /path/to/motions"
+      )
   log_dir: Path | None = None
   resume_path: Path | None = None
   if TRAINED_MODE:

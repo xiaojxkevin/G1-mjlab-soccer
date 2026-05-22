@@ -103,6 +103,43 @@ def reset_root_state_uniform(
   asset.write_root_link_velocity_to_sim(velocities, env_ids=env_ids)
 
 
+def shift_root_pose(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor | None,
+  position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+  yaw_offset: float = 0.0,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+  """Shift the current root pose by position_offset and yaw_offset.
+
+  Unlike reset_root_state_uniform which resets to default_root_state,
+  this reads the CURRENT root state, applies the offset, and writes back.
+  """
+  if env_ids is None:
+    env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
+  asset: Entity = env.scene[asset_cfg.name]
+  if asset.is_fixed_base:
+    return
+
+  pos = asset.data.root_link_pos_w[env_ids].clone()
+  quat = asset.data.root_link_quat_w[env_ids].clone()
+  pos[:, 0] += position_offset[0]
+  pos[:, 1] += position_offset[1]
+  pos[:, 2] += position_offset[2]
+  if yaw_offset != 0.0:
+    yaw_quat = quat_from_euler_xyz(
+      torch.zeros(len(env_ids), device=env.device),
+      torch.zeros(len(env_ids), device=env.device),
+      torch.full((len(env_ids),), yaw_offset, device=env.device),
+    )
+    quat = quat_mul(yaw_quat, quat)
+  # Reconstruct full root state [pos, quat, lin_vel, ang_vel].
+  lin_vel = asset.data.root_link_lin_vel_w[env_ids].clone()
+  ang_vel = asset.data.root_link_ang_vel_w[env_ids].clone()
+  new_state = torch.cat([pos, quat, lin_vel, ang_vel], dim=-1)
+  asset.write_root_state_to_sim(new_state, env_ids=env_ids.to(dtype=torch.int32))
+
+
 def reset_joints_by_offset(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor | None,

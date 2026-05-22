@@ -14,6 +14,7 @@ from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.rl import MjlabOnPolicyRunner, RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
+from src.tasks.soccer.mdp.commands import MultiMotionSoccerCommandCfg
 from mjlab.utils.gpu import select_gpus
 from mjlab.utils.os import dump_yaml, get_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
@@ -25,6 +26,7 @@ class TrainConfig:
   env: ManagerBasedRlEnvCfg
   agent: RslRlBaseRunnerCfg
   motion_file: str | None = None
+  motion_dir: str | None = None
   video: bool = False
   video_length: int = 200
   video_interval: int = 2000
@@ -80,6 +82,26 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     # Check if motion_file is already set (e.g., via CLI --env.commands.motion.motion-file).
     if motion_cmd.motion_file and Path(motion_cmd.motion_file).exists():
       print(f"[INFO] Using local motion file: {motion_cmd.motion_file}")
+
+  # Check for soccer multi-motion training tasks.
+  is_soccer_training = "motion" in cfg.env.commands and isinstance(
+    cfg.env.commands["motion"], MultiMotionSoccerCommandCfg
+  )
+
+  if is_soccer_training:
+    motion_cmd = cfg.env.commands["motion"]
+    assert isinstance(motion_cmd, MultiMotionSoccerCommandCfg)
+    if cfg.motion_dir:
+      motion_dir = Path(cfg.motion_dir).expanduser().resolve()
+      if not motion_dir.exists():
+        raise FileNotFoundError(f"Motion directory not found: {motion_dir}")
+      motion_cmd.motion_dir = str(motion_dir)
+    if not motion_cmd.motion_dir:
+      raise ValueError(
+        "For soccer training tasks, --motion-dir must be set "
+        "(or configured in the task registration)."
+      )
+    print(f"[INFO] Using motion directory: {motion_cmd.motion_dir}")
 
   # Enable NaN guard if requested.
   if cfg.enable_nan_guard:

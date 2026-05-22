@@ -1,8 +1,6 @@
 """Termination functions for the soccer task.
 
-Includes basic terminations (timeout, fell-over) and motion-reference
-terminations for shooter evaluation (anchor height, anchor orientation,
-end-effector position).
+Matches HumanoidSoccer reference implementations exactly.
 """
 
 from __future__ import annotations
@@ -12,6 +10,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.utils.lab_api.math import quat_apply_inverse
 
 if TYPE_CHECKING:
   from mjlab.entity import Entity
@@ -39,84 +38,82 @@ def bad_orientation(
 
 
 # ---------------------------------------------------------------------------
-# Motion-reference terminations (shooter — disabled by default)
+# Motion-reference terminations (matching HumanoidSoccer)
 # ---------------------------------------------------------------------------
+
+
+def _get_motion_cmd(env: ManagerBasedRlEnv, command_name: str):
+  """Resolve motion command: command_manager (training) or env attr (eval)."""
+  cmd = env.command_manager.get_term(command_name)
+  if cmd is not None:
+    return cmd
+  return getattr(env, command_name, None)
 
 
 def bad_anchor_pos_z(
   env: ManagerBasedRlEnv,
   threshold: float = 0.25,
-  command_name: str = "motion_command",
-  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  command_name: str = "motion",
 ) -> torch.Tensor:
-  """Terminate when anchor (torso) height deviates too far from motion reference.
-
-  Paper: |z_robot - z_ref| > 0.25m. Returns False if no motion command.
-  """
-  cmd = getattr(env, command_name, None)
+  """Terminate when anchor Z deviates from reference (matching paper)."""
+  cmd = _get_motion_cmd(env, command_name)
   if cmd is None:
     return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-
-  asset: Entity = env.scene[asset_cfg.name]
-  torso_idx = asset.body_names.index("torso_link")
-  robot_z = asset.data.body_link_pos_w[:, torso_idx, 2]
-  ref_z = cmd.anchor_pos_w_ref[:, 2]
-  return torch.abs(robot_z - ref_z) > threshold
+  return torch.abs(cmd.anchor_pos_w[:, -1] - cmd.robot_anchor_pos_w[:, -1]) > threshold
 
 
 def bad_anchor_ori(
   env: ManagerBasedRlEnv,
-  threshold: float = 0.8,
-  command_name: str = "motion_command",
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  threshold: float = 0.8,
+  command_name: str = "motion",
 ) -> torch.Tensor:
-  """Terminate when anchor (torso) orientation deviates too far from motion reference.
+  """Terminate when anchor orientation deviates from reference.
 
-  Paper: quat_error > 0.8. Uses 2*asin(norm(q_robot - q_ref)).
-  Returns False if no motion command.
+  Uses projected-gravity comparison (matching HumanoidSoccer reference),
+  NOT quaternion subtraction. This is yaw-invariant: only pitch/roll deviation
+  triggers termination.
   """
-  cmd = getattr(env, command_name, None)
+  cmd = _get_motion_cmd(env, command_name)
   if cmd is None:
     return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
-  asset: Entity = env.scene[asset_cfg.name]
-  torso_idx = asset.body_names.index("torso_link")
-  robot_q = asset.data.body_link_quat_w[:, torso_idx, :]
-  ref_q = cmd.anchor_quat_w_ref
-  delta = robot_q - ref_q
-  delta_norm = torch.norm(delta, dim=-1).clamp(max=1.0)
-  error = 2.0 * torch.asin(delta_norm)
-  return error > threshold
+  # World gravity direction (MuJoCo: (0,0,-1) in z-up convention).
+  grav = torch.tensor([[0.0, 0.0, -1.0]], device=env.device).expand(env.num_envs, -1)
+
+  motion_proj_grav = quat_apply_inverse(cmd.anchor_quat_w, grav)
+  robot_proj_grav = quat_apply_inverse(cmd.robot_anchor_quat_w, grav)
+  return (motion_proj_grav[:, 2] - robot_proj_grav[:, 2]).abs() > threshold
 
 
 def bad_ee_body_pos_z(
   env: ManagerBasedRlEnv,
   threshold: float = 0.25,
-  command_name: str = "motion_command",
-  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  command_name: str = "motion",
+  body_names: tuple[str, ...] = (
+    "left_ankle_roll_link", "right_ankle_roll_link",
+    "left_wrist_yaw_link", "right_wrist_yaw_link",
+  ),
 ) -> torch.Tensor:
-  """Terminate when any end-effector z deviates too far from motion reference.
+  """Terminate when any end-effector Z deviates from reference.
 
-  Paper: |z_ee - z_ref| > 0.25m for ankles and wrists.
-  Returns False if no motion command.
+  Matches reference bad_motion_body_pos_z_only exactly.
+  body_pos_relative_w[..., 2] = body_pos_w world z (yaw doesn't change z).
+  robot_body_pos_w[..., 2] = robot world z (mjlab convention).
+  Both are in world frame, so direct comparison is correct.
   """
-  cmd = getattr(env, command_name, None)
+  cmd = _get_motion_cmd(env, command_name)
   if cmd is None:
     return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
-  asset: Entity = env.scene[asset_cfg.name]
-  ee_names = (
-    "left_ankle_roll_link", "right_ankle_roll_link",
-    "left_wrist_yaw_link", "right_wrist_yaw_link",
-  )
-  ee_robot_indices = [asset.body_names.index(n) for n in ee_names]
+  body_indexes = [
+    i for i, name in enumerate(cmd.cfg.body_names)
+    if name in body_names
+  ]
+  if not body_indexes:
+    return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
-  # Full-body indices for the same end-effectors in the motion data (30 bodies).
-  ee_motion_indices = [6, 12, 22, 29]
-
-  robot_z = asset.data.body_link_pos_w[:, ee_robot_indices, 2]  # (E, 4)
-  ref_z = torch.cat(
-    [cmd.get_ee_pos_w_ref(bi)[:, 2:3] for bi in ee_motion_indices], dim=-1
-  )  # (E, 4)
-  deviations = torch.abs(robot_z - ref_z)
-  return deviations.max(dim=-1).values > threshold
+  ref_z = cmd.body_pos_relative_w[:, body_indexes, 2]
+  robot_z = cmd.robot_body_pos_w[:, body_indexes, 2]
+  error = torch.abs(ref_z - robot_z)
+  return torch.any(error > threshold, dim=-1)
