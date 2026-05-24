@@ -16,8 +16,8 @@ import torch
 from mjlab.managers import SceneEntityCfg
 from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse, quat_inv
 
-from .commands import MultiMotionSoccerCommand
-from .kick_detection import KickContactTracker
+from .shooter_commands import MultiMotionSoccerCommand
+from .shooter_kick_detection import KickContactTracker
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv

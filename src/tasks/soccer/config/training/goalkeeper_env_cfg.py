@@ -56,8 +56,8 @@ from src.tasks.soccer.mdp.goalkeeper_obs import (
   gk_last_action,
   gk_lin_vel,
 )
-from src.tasks.soccer.mdp.training_rewards import action_rate_l2_clip
-from src.tasks.soccer.mdp.soccer_reset import RegionBallVelCfg, reset_ball_with_parabolic_trajectory
+from src.tasks.soccer.mdp.shooter_rewards import action_rate_l2_clip
+from src.tasks.soccer.mdp.goalkeeper_ball_reset import RegionBallVelCfg, reset_ball_with_parabolic_trajectory
 
 
 def make_goalkeeper_env_cfg() -> ManagerBasedRlEnvCfg:

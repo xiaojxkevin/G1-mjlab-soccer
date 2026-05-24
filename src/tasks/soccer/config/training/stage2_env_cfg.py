@@ -23,12 +23,12 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from src.tasks.soccer.config.training.stage1_env_cfg import make_stage1_env_cfg
 
-from src.tasks.soccer.mdp.training_obs import (
+from src.tasks.soccer.mdp.shooter_obs import (
   constant_target_point_pos,
   target_destination_pos_local,
 )
 
-from src.tasks.soccer.mdp.training_rewards import (
+from src.tasks.soccer.mdp.shooter_rewards import (
   action_rate_l2_clip,
   ball_speed_reward,
   ball_velocity_direction_alignment,
@@ -40,7 +40,7 @@ from src.tasks.soccer.mdp.training_rewards import (
   waist_action_rate_l2_clip,
 )
 
-from src.tasks.soccer.mdp.commands import MultiMotionSoccerCommandCfg
+from src.tasks.soccer.mdp.shooter_commands import MultiMotionSoccerCommandCfg
 
 
 def make_stage2_env_cfg() -> ManagerBasedRlEnvCfg:

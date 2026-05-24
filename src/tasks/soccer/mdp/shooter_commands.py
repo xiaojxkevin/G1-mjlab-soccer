@@ -273,7 +273,7 @@ class MultiMotionSoccerCommand(CommandTerm):
     self._init_metrics()
 
     # Initialize kick contact tracker for Stage II rewards.
-    from .kick_detection import KickContactTracker
+    from .shooter_kick_detection import KickContactTracker
     self.kick_contact_tracker = KickContactTracker(env, "_motion")
 
     # Resample all envs on first reset (handled by CommandTerm.reset() calling _resample).

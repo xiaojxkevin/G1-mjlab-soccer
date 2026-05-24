@@ -68,7 +68,7 @@ class EvalConfig:
   num_trials: int = 0      # number of eval episodes (>0 implies headless)
 
   # Internal
-  task_id: str = "Eval-Naive-Goalkeeper"
+  task_id: str = "Eval-Goalkeeper"
 
 
 # ----- PPO config for checkpoint loading -----
@@ -320,150 +320,6 @@ def run_headless_eval(cfg: EvalConfig, env, policy):
 # ----- Main -----
 
 
-def _diagnose_observations(env, policy, device, num_steps: int = 5):
-  """Collect and print observation statistics for debugging.
-
-  Runs a few steps and reports per-term min/max/mean so we can verify
-  the observation scaling matches what the pretrained model expects.
-  """
-  print(f"\n{'='*60}")
-  print(f"  OBSERVATION DIAGNOSTIC (sampling {num_steps} steps)")
-  print(f"{'='*60}")
-
-  obs = env.reset()
-  if isinstance(obs, tuple):
-    obs = obs[0]
-
-  actor_cfg = env.unwrapped.cfg.observations["actor"]
-  critic_cfg = env.unwrapped.cfg.observations["critic"]
-  term_names = list(actor_cfg.terms.keys())
-  critic_term_names = list(critic_cfg.terms.keys())
-
-  # Print term → function mapping.
-  print(f"\nActor term → function:")
-  for name in term_names:
-    t = actor_cfg.terms[name]
-    fn_name = getattr(t.func, "__name__", str(t.func))
-    print(f"  {name:20s} → {fn_name}")
-
-  # Collect samples.
-  actor_samples = []
-  critic_samples = []
-  action_samples = []
-
-  for _step in range(num_steps):
-    # Handle dict, TensorDict, and raw tensor observation formats.
-    if isinstance(obs, dict):
-      a_obs = obs.get("actor", obs)
-    elif hasattr(obs, "get") and callable(obs.get) and "actor" in obs:
-      a_obs = obs["actor"]
-    else:
-      a_obs = obs
-
-    if hasattr(a_obs, "detach"):
-      a_obs = a_obs.detach().cpu()
-    actor_samples.append(a_obs.flatten())
-
-    if isinstance(obs, dict):
-      c_obs = obs.get("critic", None)
-    elif hasattr(obs, "get") and callable(obs.get) and "critic" in obs:
-      c_obs = obs["critic"]
-    else:
-      c_obs = None
-    if c_obs is not None:
-      if hasattr(c_obs, "detach"):
-        c_obs = c_obs.detach().cpu()
-      critic_samples.append(c_obs.flatten())
-
-    with torch.inference_mode():
-      action = policy(obs)
-    if hasattr(action, "detach"):
-      action = action.detach().cpu()
-    action_samples.append(action.flatten())
-
-    result = env.step(action)
-    obs = result[0]
-
-  actor_stack = torch.stack(actor_samples)  # (num_steps, actor_dim)
-  action_stack = torch.stack(action_samples)  # (num_steps, action_dim)
-
-  # Compute per-term statistics for actor.
-  # Term sizes: ball_pos(3), ang_vel(3), gravity(3), joint_pos(29), joint_vel(29), actions(29)
-  term_sizes = {"ball_pos_local": 3, "base_ang_vel": 3, "projected_gravity": 3,
-                "joint_pos": 29, "joint_vel": 29, "actions": 29}
-  offset = 0
-  print(f"\n--- Actor observation statistics ({num_steps} steps) ---")
-  print(f"{'Term':<20s} {'Size':>4s} {'Min':>10s} {'Max':>10s} {'Mean':>10s} {'Std':>10s}")
-  print(f"{'-'*20} {'-'*4} {'-'*10} {'-'*10} {'-'*10} {'-'*10}")
-  for name in term_names:
-    sz = term_sizes.get(name, 0)
-    if sz == 0 or offset + sz > actor_stack.shape[1]:
-      print(f"  {name}: UNKNOWN SIZE (offset={offset}, total_dim={actor_stack.shape[1]})")
-      break
-    chunk = actor_stack[:, offset:offset + sz]
-    print(f"{name:<20s} {sz:4d} {chunk.min():10.4f} {chunk.max():10.4f} "
-          f"{chunk.mean():10.4f} {chunk.std():10.4f}")
-    offset += sz
-
-  print(f"\nTotal actor dim: {actor_stack.shape[1]} (expected 960 with history=10)")
-
-  # Critic stats.
-  if critic_samples:
-    critic_stack = torch.stack(critic_samples)
-    print(f"\n--- Critic observation statistics ({num_steps} steps) ---")
-    print(f"Total critic dim: {critic_stack.shape[1]} (expected 113)")
-    print(f"Min={critic_stack.min():.4f} Max={critic_stack.max():.4f} "
-          f"Mean={critic_stack.mean():.4f} Std={critic_stack.std():.4f}")
-
-  # Action statistics.
-  print(f"\n--- Action output statistics (from policy) ---")
-  print(f"Min={action_stack.min():.4f} Max={action_stack.max():.4f} "
-        f"Mean={action_stack.mean():.4f} Std={action_stack.std():.4f}")
-  print(f"Action dim: {action_stack.shape[1]} (expected 29)")
-
-  # Reference ranges for comparison.
-  print(f"\n--- Reference expected ranges (post-scaling) ---")
-  print(f"  ball_pos_local:      raw meters, typically [-3, 3] (no scaling)")
-  print(f"  base_ang_vel:        rad/s * 0.25, typically [-2, 2] raw → [-0.5, 0.5] scaled")
-  print(f"  projected_gravity:   raw, in [-1, 1]")
-  print(f"  joint_pos (scaled):  (pos - gk_default), typically [-1, 2]")
-  print(f"  joint_vel (scaled):  rad/s * 0.05, typically [-5, 5] raw → [-0.25, 0.25] scaled")
-  print(f"  actions (scaled):    raw, typically [-1, 1]")
-
-  # Raw joint position check: verify default is correct.
-  robot = env.unwrapped.scene["robot"]
-  raw_joint_pos = robot.data.joint_pos[0].cpu().numpy()
-  from src.tasks.soccer.mdp.goalkeeper_obs import _REF_DEFAULT_DOF_POS
-  ref_default = np.array(_REF_DEFAULT_DOF_POS)
-  home_keyframe = robot.data.default_joint_pos[0].cpu().numpy()
-
-  print(f"\n--- Joint position default verification ---")
-  print(f"  Raw joint_pos (first 3):     {raw_joint_pos[:3]}")
-  print(f"  GK ref default (first 3):     {ref_default[:3]}")
-  print(f"  HOME_KEYFRAME default (first 3): {home_keyframe[:3]}")
-  print(f"  obs = pos - GK_default (first 3): {raw_joint_pos[:3] - ref_default[:3]}")
-  print(f"  obs = pos - HOME (first 3):       {raw_joint_pos[:3] - home_keyframe[:3]}")
-
-  # Check specific joints that differ most.
-  # left_shoulder_roll (idx 16): GK=0.5, HOME=0.18
-  # left_elbow (idx 19): GK=1.2, HOME=0.87
-  # right_shoulder_roll (idx 23): GK=-0.5, HOME=-0.18
-  key_joints = {
-    16: ("left_shoulder_roll", 0.5, 0.18),
-    19: ("left_elbow", 1.2, 0.87),
-    23: ("right_shoulder_roll", -0.5, -0.18),
-  }
-  for idx, (name, gk_d, home_d) in key_joints.items():
-    print(f"  {name} (idx {idx}): raw={raw_joint_pos[idx]:.4f}, "
-          f"GK_default={gk_d}, HOME_default={home_d}, "
-          f"obs(GK)={raw_joint_pos[idx] - gk_d:.4f}, obs(HOME)={raw_joint_pos[idx] - home_d:.4f}")
-
-  print(f"\n{'='*60}\n")
-
-  # Reset env for actual run.
-  env.reset()
-
-
 def run_eval(cfg: EvalConfig):
   configure_torch_backends()
   device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -537,9 +393,6 @@ def run_eval(cfg: EvalConfig):
   print(f"  Actor obs dim:  {actor_shape}")
   print(f"  Critic obs dim: {critic_shape}")
   print(f"  Action dim:     {action_dim}")
-
-  # Run diagnostic: sample observations and print per-term statistics.
-  _diagnose_observations(env, policy, device)
 
   # Run headless or viewer.
   if cfg.headless:

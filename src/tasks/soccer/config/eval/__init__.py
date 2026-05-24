@@ -1,4 +1,4 @@
-"""Register evaluation tasks for naive shooter and goalkeeper.
+"""Register evaluation tasks for shooter and goalkeeper.
 
 The shooter eval reuses the Stage II play config directly (via
 eval_shooter_env_cfg) so the environment is identical to play mode.
@@ -12,7 +12,7 @@ from src.tasks.soccer.config.g1.rl_cfg import unitree_g1_soccer_ppo_runner_cfg
 
 
 register_mjlab_task(
-  task_id="Eval-Naive-Shooter",
+  task_id="Eval-Shooter",
   env_cfg=eval_shooter_env_cfg(play=False),
   play_env_cfg=eval_shooter_env_cfg(play=True),
   rl_cfg=unitree_g1_soccer_ppo_runner_cfg(),
@@ -20,7 +20,7 @@ register_mjlab_task(
 )
 
 register_mjlab_task(
-  task_id="Eval-Naive-Goalkeeper",
+  task_id="Eval-Goalkeeper",
   env_cfg=eval_goalkeeper_env_cfg(play=False),
   play_env_cfg=eval_goalkeeper_env_cfg(play=True),
   rl_cfg=unitree_g1_soccer_ppo_runner_cfg(),

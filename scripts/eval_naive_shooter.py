@@ -64,7 +64,7 @@ class EvalConfig:
   headless: bool = False
   num_trials: int = 0
 
-  task_id: str = "Eval-Naive-Shooter"
+  task_id: str = "Eval-Shooter"
 
 
 def _load_policy(checkpoint_path: str, env, device: str):

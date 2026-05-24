@@ -1,0 +1,165 @@
+\documentclass{article}
+
+% if you need to pass options to natbib, use, e.g.:
+\PassOptionsToPackage{numbers, compress}{natbib}
+% before loading neurips_2026
+
+% The authors should use one of these tracks.
+% Before accepting by the NeurIPS conference, select one of the options below.
+% 0. "default" for submission
+% \usepackage{neurips_2026}
+% the "default" option is equal to the "main" option, which is used for the Main Track with double-blind reviewing.
+% 1. "main" option is used for the Main Track
+%  \usepackage[main]{neurips_2026}
+% 2. "position" option is used for the Position Paper Track
+%  \usepackage[position]{neurips_2026}
+% 3. "eandd" option is used for the Evaluations & Datasets Track
+ % \usepackage[eandd]{neurips_2026}
+% 4. "creativeai" option is used for the Creative AI Track
+%  \usepackage[creativeai]{neurips_2026}
+% 5. "sglblindworkshop" option is used for the Workshop with single-blind reviewing
+ % \usepackage[sglblindworkshop]{neurips_2026}
+% 6. "dblblindworkshop" option is used for the Workshop with double-blind reviewing
+%  \usepackage[dblblindworkshop]{neurips_2026}
+
+% After being accepted, the authors should add "final" behind the track to compile a camera-ready version.
+% 1. Main Track
+%  \usepackage[main, final]{neurips_2026}
+% 2. Position Paper Track
+%  \usepackage[position, final]{neurips_2026}
+% 3. Evaluations & Datasets Track
+ % \usepackage[eandd, final]{neurips_2026}
+% 4. Creative AI Track
+%  \usepackage[creativeai, final]{neurips_2026}
+% 5. Workshop with single-blind reviewing
+%  \usepackage[sglblindworkshop, final]{neurips_2026}
+% 6. Workshop with double-blind reviewing
+%  \usepackage[dblblindworkshop, final]{neurips_2026}
+% Note. For the workshop paper template, both \title{} and \workshoptitle{} are required, with the former indicating the paper title shown in the title and the latter indicating the workshop title displayed in the footnote.
+% For workshops (5., 6.), the authors should add the name of the workshop, "\workshoptitle" command is used to set the workshop title.
+% \workshoptitle{WORKSHOP TITLE}
+
+% "preprint" option is used for arXiv or other preprint submissions
+ \usepackage[preprint]{neurips_2026}
+
+% to avoid loading the natbib package, add option nonatbib:
+%    \usepackage[nonatbib]{neurips_2026}
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{amsmath}        % math
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{xcolor}         % colors
+
+% Note. For the workshop paper template, both \title{} and \workshoptitle{} are required, with the former indicating the paper title shown in the title and the latter indicating the workshop title displayed in the footnote.
+\title{Project: Unitree G1 Soccer Skills}
+
+
+% The \author macro works with any number of authors. There are two commands
+% used to separate the names and addresses of multiple authors: \And and \AND.
+%
+% Using \And between authors leaves it to LaTeX to determine where to break the
+% lines. Using \AND forces a line break at that point. So, if LaTeX puts 3 of 4
+% authors names on the first line, and the last on the second line, try using
+% \AND instead of \And before the third author name.
+
+
+\author{CS2810 Teaching Team}
+
+
+\begin{document}
+
+\maketitle
+
+\section{Overview}
+
+This is the project component of Embodied AI CS2810 Spring 2026. The task is to develop reinforcement learning skills for humanoid robot soccer using the Unitree G1 platform in MuJoCo physics simulation. The project centers on two tasks:
+
+\begin{itemize}
+  \item \textbf{Shooting}: The G1 robot must approach and kick a stationary ball toward a goal. This is a perception-guided motor skill requiring motion tracking priors and ball trajectory prediction.
+  \item \textbf{Goalkeeping}: The G1 robot must intercept an incoming ball launched along a parabolic trajectory. This is a reactive interception task requiring rapid end-effector positioning and ball trajectory estimation.
+\end{itemize}
+
+\section{Project Phases}
+
+\subsection{Phase 1: Basic Shooting and Goalkeeping (60\% of project score)}
+
+Implement single-agent training for the shooter and goalkeeper tasks:
+
+\begin{itemize}
+  \item Design observation spaces, reward functions, and neural network architectures following the designs in \cite{kong2026learningsoccerskillshumanoid} and \cite{ren2025humanoidgoalkeeper}.
+  \item Implement PPO training loops using the provided simulation environment and training entrypoint (\texttt{scripts/train.py}).
+  \item Evaluate trained policies using the provided eval scripts. Target metrics (for full credit):
+    \begin{itemize}
+      \item Shooter: 100\% success rate over 50 trials (ball crosses goal plane inside the frame).
+      \item Goalkeeper: 90\% block rate over 50 trials (ball velocity drops $>$2 m/s behind the robot).
+    \end{itemize}
+\end{itemize}
+
+\subsection{Phase 2: Adversarial Tournament (40\% of project score)}
+
+Extend to adversarial play where a shooter and goalkeeper compete:
+
+\begin{itemize}
+  \item Load two G1 robots simultaneously in the same MuJoCo scene.
+  \item Implement self-play or league-based training to improve both shooting and goalkeeping against adversarial opponents.
+  \item Compete in a class-wide tournament: each teams's shooter is evaluated against other teams' goalkeepers, and vice versa.
+\end{itemize}
+
+\textbf{Important}: Loading two G1 robots simultaneously for adversarial play is \textbf{not yet supported} in this template. It is required to extend the environment to support multi-robot scenes for Phase 2. This feature will be added in a future update.
+
+\section{Using the Template}
+
+\subsection{Repository Structure}
+
+The template provides:
+
+\begin{itemize}
+  \item \textbf{Playable environments}: \texttt{Unitree-G1-Shooter} and \texttt{Unitree-G1-Goalkeeper} registered as mjlab tasks with configurable scene layout, ball physics, and MuJoCo visualization.
+  \item \textbf{Evaluation scripts}: \texttt{eval\_naive\_shooter.py} and \texttt{eval\_naive\_goalkeeper.py} that load trained checkpoints, run headless batch trials, collect paper-matching metrics, and record videos.
+  \item \textbf{Training configs}: Training environment designs under \texttt{config/training/} that specify observation spaces, reward functions, termination conditions, and domain randomization from the two papers. And it should be noticed that these are generated with coding agents and may contain errors. So you should carefully review and debug them before use.\footnote{(Jinxi's Note: actually you cannot get full 60\% credit by just running these configs, you need to understand the design and implement your own training pipeline.)}
+\end{itemize}
+
+\subsection{Play and Visualization}
+
+Use the \texttt{scripts/play.py} script to visualize the environment:
+
+\begin{verbatim}
+# Shooter
+python scripts/play.py Unitree-G1-Shooter --agent zero --viewer native
+
+# Goalkeeper
+python scripts/play.py Unitree-G1-Goalkeeper --agent zero --viewer native
+\end{verbatim}
+
+\subsection{Evaluation}
+
+Use the eval scripts to benchmark trained policies:
+
+\begin{verbatim}
+# Shooter
+python scripts/eval_naive_shooter.py --headless --num-trials 50 \
+    --checkpoint <path>
+
+# Goalkeeper
+python scripts/eval_naive_goalkeeper.py --headless --num-trials 50 \
+    --checkpoint <path>
+\end{verbatim}
+
+\subsection{Implementing Training}
+
+The \texttt{train.py} script in \texttt{scripts/} serves as the training entrypoint. It is expected to register their own training tasks, implement the ActorCritic model classes, and run PPO training.
+
+\section{Reference}
+
+This project is based on the following papers:
+
+\bibliographystyle{IEEEtran}
+\bibliography{ref}
+
+\end{document}

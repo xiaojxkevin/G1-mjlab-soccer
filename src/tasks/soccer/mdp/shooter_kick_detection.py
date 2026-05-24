@@ -16,7 +16,7 @@ from mjlab.managers import SceneEntityCfg
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
   from mjlab.sensor import ContactSensor
-  from .commands import MultiMotionSoccerCommand
+  from .shooter_commands import MultiMotionSoccerCommand
 
 
 @dataclass

@@ -88,7 +88,7 @@ def _setup_g1_training(cfg: ManagerBasedRlEnvCfg) -> None:
   # The actual path is set by the training script via --motion-dir.
   motion_cmd = cfg.commands.get("motion")
   if isinstance(motion_cmd, MultiMotionSoccerCommandCfg):
-    motion_cmd.motion_dir = "src/assets/soccer/motions"
+    motion_cmd.motion_dir = "src/assets/soccer/motions/shooter"
 
 
 def unitree_g1_stage1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -106,7 +106,7 @@ def unitree_g1_stage1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.events.pop("push_robot", None)
     for key in ("anchor_pos_z", "anchor_ori", "ee_body_pos"):
       cfg.terminations.pop(key, None)
-    from src.tasks.soccer.mdp.commands import MultiMotionSoccerCommandCfg
+    from src.tasks.soccer.mdp.shooter_commands import MultiMotionSoccerCommandCfg
     motion_cmd = cfg.commands.get("motion")
     if isinstance(motion_cmd, MultiMotionSoccerCommandCfg):
       motion_cmd.debug_vis = True
@@ -132,7 +132,7 @@ def unitree_g1_stage2_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.events.pop("push_robot", None)
     for key in ("anchor_pos_z", "anchor_ori", "ee_body_pos"):
       cfg.terminations.pop(key, None)
-    from src.tasks.soccer.mdp.commands import MultiMotionSoccerCommandCfg
+    from src.tasks.soccer.mdp.shooter_commands import MultiMotionSoccerCommandCfg
     motion_cmd = cfg.commands.get("motion")
     if isinstance(motion_cmd, MultiMotionSoccerCommandCfg):
       motion_cmd.debug_vis = True

@@ -42,20 +42,20 @@ from mjlab.tasks.tracking.mdp.rewards import (  # type: ignore[import-untyped]
 )
 
 # Soccer training observation functions (MultiMotionSoccerCommand-aware).
-from src.tasks.soccer.mdp.training_obs import (
+from src.tasks.soccer.mdp.shooter_obs import (
   motion_anchor_ang_vel as _motion_anchor_ang_vel,
   robot_body_pos_b,
   robot_body_ori_b,
 )
 
 # Soccer reward functions.
-from src.tasks.soccer.mdp.training_rewards import (
+from src.tasks.soccer.mdp.shooter_rewards import (
   action_rate_l2_clip,
   foot_distance,
 )
 
 # Soccer-specific command.
-from src.tasks.soccer.mdp.commands import MultiMotionSoccerCommandCfg
+from src.tasks.soccer.mdp.shooter_commands import MultiMotionSoccerCommandCfg
 
 # mjlab built-in.
 from mjlab.envs.mdp.rewards import joint_pos_limits
@@ -162,11 +162,11 @@ def make_stage1_env_cfg() -> ManagerBasedRlEnvCfg:
   critic_terms = {
     **actor_terms,
     "motion_anchor_pos_b": ObservationTermCfg(
-      func=mdp.training_obs.motion_anchor_pos_b,
+      func=mdp.shooter_obs.motion_anchor_pos_b,
       params={"command_name": "motion"},
     ),
     "motion_anchor_ori_b": ObservationTermCfg(
-      func=mdp.training_obs.motion_anchor_ori_b,
+      func=mdp.shooter_obs.motion_anchor_ori_b,
       params={"command_name": "motion"},
     ),
     "body_pos": ObservationTermCfg(
