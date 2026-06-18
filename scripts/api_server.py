@@ -36,6 +36,7 @@ from __future__ import annotations
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
+import os
 from typing import Any
 
 import torch
@@ -46,36 +47,59 @@ from pydantic import BaseModel
 import uvicorn
 
 from mjlab.envs import ManagerBasedRlEnv
+from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
+from src.assets.robots.unitree_g1.g1_constants import HOME_KEYFRAME
+from src.tasks.soccer.mdp.goalkeeper_obs import _GK_JOINT_NAMES, _REF_DEFAULT_DOF_POS
 
 # ---------------------------------------------------------------------------
 # Default joint positions  (match training configs)
 # ---------------------------------------------------------------------------
 
-_SHOOTER_DEFAULT_JOINT_POS = torch.tensor([
-    0.0, 0.0, 0.0,          # left/right hip, waist
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # left leg
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # right leg
-    0.0, 0.0, 0.0,          # torso
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # left arm
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # right arm
-])
+_SHOOTER_DEFAULT_JOINT_POS = torch.zeros(29, dtype=torch.float32)
 
-_GK_DEFAULT_JOINT_POS = torch.tensor([
-    0.0, 0.0, 0.0,          # left/right hip, waist
-    -0.35, 0.7, -0.35, -0.25, 0.3, -0.1,    # left leg
-    -0.35, 0.7, -0.35, -0.25, 0.3, -0.1,    # right leg
-    0.0, 0.3, 0.0,          # torso
-    0.8, 0.0, -1.6, 0.0, 0.5, 0.0, 0.0,   # left arm
-    0.8, 0.0, -1.6, 0.0, 0.5, 0.0, 0.0,   # right arm
-])
+_GK_DEFAULT_JOINT_POS = torch.tensor(_REF_DEFAULT_DOF_POS, dtype=torch.float32)
+
+_GK_STATIC_GUARD_ENABLED = os.environ.get("GK_STATIC_GUARD", "0") == "1"
+_GK_STATIC_GUARD_SPEED = float(os.environ.get("GK_STATIC_GUARD_SPEED", "0.5"))
+_GK_STATIC_GUARD_HISTORY = int(os.environ.get("GK_STATIC_GUARD_HISTORY", "5"))
+_GK_STATIC_GUARD_MODE = os.environ.get("GK_STATIC_GUARD_MODE", "masked_policy")
+_GK_STATIC_GUARD_ACTION = os.environ.get("GK_STATIC_GUARD_ACTION", "stand")
+_GK_STATIC_GUARD_ACTION_SCALE = float(os.environ.get("GK_STATIC_GUARD_ACTION_SCALE", "0.35"))
+_GK_STATIC_GUARD_BALL_LOCAL = torch.tensor(
+    [float(v) for v in os.environ.get("GK_STATIC_GUARD_BALL_LOCAL", "5.0,0.0,0.5").split(",")],
+    dtype=torch.float32,
+)
+
+
+def _home_joint_value(joint_name: str) -> float:
+    for pattern, value in HOME_KEYFRAME.joint_pos.items():
+        if pattern == joint_name:
+            return float(value)
+        if pattern.startswith(".*") and joint_name.endswith(pattern[2:]):
+            return float(value)
+    return 0.0
+
+
+_GK_STAND_GUARD_ACTION = (
+    torch.tensor(
+        [_home_joint_value(name) for name in _GK_JOINT_NAMES],
+        dtype=torch.float32,
+    )
+    - _GK_DEFAULT_JOINT_POS
+) / 0.25
 
 # ---------------------------------------------------------------------------
 # Observation computation  (CUSTOMIZE: match your training observation space)
 # ---------------------------------------------------------------------------
 
-def compute_shooter_obs(raw_state: dict) -> torch.Tensor:
+def compute_shooter_obs(
+    raw_state: dict,
+    *,
+    command_term: Any | None = None,
+    default_joint_pos: torch.Tensor | None = None,
+) -> torch.Tensor:
     """Compute shooter observation tensor from raw state.
 
     Default: proprioception + ball position (~100-D, no history).
@@ -99,19 +123,32 @@ def compute_shooter_obs(raw_state: dict) -> torch.Tensor:
     # Base angular velocity in robot frame
     base_ang_vel = quat_apply(quat_inv(root_quat), root_ang_vel)
 
-    # Joint positions relative to default
-    joint_pos_rel = joint_pos - _SHOOTER_DEFAULT_JOINT_POS
+    # Joint positions relative to the same default pose used by the eval env.
+    default = default_joint_pos if default_joint_pos is not None else _SHOOTER_DEFAULT_JOINT_POS
+    joint_pos_rel = joint_pos - default.cpu()
 
-    # Ball position in robot pelvis frame
+    # Ball and goal position in robot pelvis frame.
     ball_pos_local = quat_apply(quat_inv(root_quat), ball_pos - root_pos)
+    goal_pos = torch.tensor([-0.5, 0.0, 0.0], dtype=torch.float32)
+    goal_pos_local = quat_apply(quat_inv(root_quat), goal_pos - root_pos)
+
+    if command_term is not None:
+        command = command_term.command[0].detach().cpu().to(torch.float32)
+        motion_ref_ang_vel = command_term.anchor_ang_vel_w[0].detach().cpu().to(torch.float32)
+    else:
+        command = torch.zeros(58, dtype=torch.float32)
+        motion_ref_ang_vel = torch.zeros(3, dtype=torch.float32)
 
     obs = torch.cat([
-        base_ang_vel,           # 3
+        command,                # 58
         projected_gravity,      # 3
+        motion_ref_ang_vel,     # 3
+        base_ang_vel,           # 3
         joint_pos_rel,          # 29
         joint_vel,              # 29
         last_action,            # 29
         ball_pos_local,         # 3
+        goal_pos_local,         # 3
     ])
     return obs.unsqueeze(0)  # (1, obs_dim)
 
@@ -160,6 +197,23 @@ def compute_goalkeeper_obs(raw_state: dict) -> torch.Tensor:
     return obs.unsqueeze(0)  # (1, 96)
 
 
+def stack_goalkeeper_history_term_major(history: deque[torch.Tensor]) -> torch.Tensor:
+    """Stack GK frame history in the same term-major order as mjlab observations.
+
+    ``GoalkeeperActorCritic`` expects mjlab's history layout as input and then
+    transposes it internally. Each frame here is 96-D frame-major, so the API
+    server must explicitly rebuild the term-major 960-D layout.
+    """
+    term_sizes = (3, 3, 3, 29, 29, 29)
+    frames = list(history)
+    chunks = []
+    offset = 0
+    for size in term_sizes:
+        chunks.extend(frame[:, offset : offset + size] for frame in frames)
+        offset += size
+    return torch.cat(chunks, dim=-1)
+
+
 # ---------------------------------------------------------------------------
 # Request / response schemas
 # ---------------------------------------------------------------------------
@@ -179,7 +233,8 @@ def _load_policy(checkpoint_path: str, task_id: str, device: str) -> Any:
 
     env_cfg = load_env_cfg(task_id, play=False)
     env_cfg.scene.num_envs = 1
-    env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+    env_base = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+    env = RslRlVecEnvWrapper(env_base, clip_actions=100.0)
 
     actor_terms = list(env_cfg.observations["actor"].terms.keys())
     history_len = env_cfg.observations["actor"].history_length
@@ -230,11 +285,43 @@ def create_app(checkpoint_path: str, task_id: str, device: str) -> FastAPI:
     """Build the FastAPI app with a loaded policy and obs computer."""
 
     policy, env = _load_policy(checkpoint_path, task_id, device)
+    policy_device = torch.device(device)
+    env_base = env.unwrapped
     is_gk = task_id == "Eval-Goalkeeper"
     history_len = 10 if is_gk else 1
+    shooter_default_joint_pos = None
+    if not is_gk:
+        shooter_default_joint_pos = (
+            env_base.scene["robot"].data.default_joint_pos[0]
+            .detach()
+            .cpu()
+            .to(torch.float32)
+        )
 
     # History buffer for goalkeeper's multi-frame observation stack.
     history: deque[torch.Tensor] = deque(maxlen=history_len)
+    ball_speed_history: deque[float] = deque(maxlen=max(1, _GK_STATIC_GUARD_HISTORY))
+    gk_guard_released = not (is_gk and _GK_STATIC_GUARD_ENABLED)
+    gk_guard_action = torch.zeros(1, env.num_actions, device=policy_device)
+    if is_gk and _GK_STATIC_GUARD_ACTION == "stand":
+        gk_guard_action = _GK_STAND_GUARD_ACTION.to(policy_device).unsqueeze(0)
+    if is_gk and _GK_STATIC_GUARD_ENABLED:
+        if _GK_STATIC_GUARD_BALL_LOCAL.numel() != 3:
+            raise ValueError(
+                "GK_STATIC_GUARD_BALL_LOCAL must contain exactly 3 comma-separated values"
+            )
+        if _GK_STATIC_GUARD_MODE not in {"hold_action", "masked_policy"}:
+            raise ValueError(
+                "GK_STATIC_GUARD_MODE must be either 'hold_action' or 'masked_policy'"
+            )
+        print(
+            "[INFO] GK static-ball guard enabled: "
+            f"speed>{_GK_STATIC_GUARD_SPEED:.3f} m/s over "
+            f"{_GK_STATIC_GUARD_HISTORY} frame(s) releases policy; "
+            f"mode={_GK_STATIC_GUARD_MODE}; "
+            f"hold action={_GK_STATIC_GUARD_ACTION}; "
+            f"action scale={_GK_STATIC_GUARD_ACTION_SCALE:.3f}."
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -253,12 +340,34 @@ def create_app(checkpoint_path: str, task_id: str, device: str) -> FastAPI:
 
     @app.post("/act", response_model=ActResponse)
     async def act(req: dict):
+        nonlocal gk_guard_released
         # Compute per-frame observation from raw state.
         raw_state = req
+        gk_guard_active = False
+        if is_gk and _GK_STATIC_GUARD_ENABLED and not gk_guard_released:
+            ball_vel = torch.tensor(raw_state["ball"]["vel"], dtype=torch.float32)
+            ball_speed_history.append(float(torch.linalg.norm(ball_vel).item()))
+            if max(ball_speed_history) > _GK_STATIC_GUARD_SPEED:
+                gk_guard_released = True
+                print(
+                    "[INFO] GK static-ball guard released: "
+                    f"recent speeds={list(round(v, 3) for v in ball_speed_history)}"
+                )
+            else:
+                gk_guard_active = True
+
         if is_gk:
             frame = compute_goalkeeper_obs(raw_state)
+            if gk_guard_active and _GK_STATIC_GUARD_MODE == "masked_policy":
+                frame = frame.clone()
+                frame[:, :3] = _GK_STATIC_GUARD_BALL_LOCAL.to(frame.device)
         else:
-            frame = compute_shooter_obs(raw_state)
+            env_base.command_manager.compute(dt=env_base.step_dt)
+            frame = compute_shooter_obs(
+                raw_state,
+                command_term=env_base.command_manager.get_term("motion"),
+                default_joint_pos=shooter_default_joint_pos,
+            )
 
         # Initialize history buffer on first frame after reset.
         if len(history) == 0:
@@ -267,18 +376,41 @@ def create_app(checkpoint_path: str, task_id: str, device: str) -> FastAPI:
 
         history.append(frame)
 
-        # Build stacked observation: (1, history_len × frame_dim).
-        stacked = torch.cat(list(history), dim=-1)
+        # Build stacked observation. GK policies expect mjlab's term-major
+        # history layout; shooter history length is one frame.
+        if is_gk:
+            stacked = stack_goalkeeper_history_term_major(history).to(policy_device)
+        else:
+            stacked = torch.cat(list(history), dim=-1).to(policy_device)
+
+        if gk_guard_active and _GK_STATIC_GUARD_MODE == "hold_action":
+            return ActResponse(action=gk_guard_action.detach().cpu().tolist())
 
         with torch.inference_mode():
             action = policy({"actor": stacked})
 
-        return ActResponse(action=action.cpu().tolist())
+        if action.ndim != 2 or action.shape[-1] != env.num_actions:
+            raise RuntimeError(
+                f"Policy returned action shape {tuple(action.shape)}, "
+                f"expected (1, {env.num_actions})"
+            )
+
+        if gk_guard_active and _GK_STATIC_GUARD_MODE == "masked_policy":
+            action = action * _GK_STATIC_GUARD_ACTION_SCALE
+
+        return ActResponse(action=action.detach().cpu().tolist())
 
     @app.post("/reset")
     async def reset():
-        policy.reset()
+        nonlocal gk_guard_released
+        reset_fn = getattr(policy, "reset", None)
+        if callable(reset_fn):
+            reset_fn()
+        with torch.inference_mode():
+            env.reset()
         history.clear()
+        ball_speed_history.clear()
+        gk_guard_released = not (is_gk and _GK_STATIC_GUARD_ENABLED)
         return {"status": "ok"}
 
     return app
