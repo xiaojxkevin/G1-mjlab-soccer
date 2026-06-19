@@ -94,45 +94,163 @@ _GK_STAND_GUARD_ACTION = (
 # Observation computation  (CUSTOMIZE: match your training observation space)
 # ---------------------------------------------------------------------------
 
-def compute_shooter_obs(raw_state: dict) -> torch.Tensor:
-    """Compute shooter observation tensor from raw state.
+def _tensor(values: Any, device: str | torch.device) -> torch.Tensor:
+    return torch.as_tensor(values, dtype=torch.float32, device=device)
 
-    Default: proprioception + ball position (~100-D, no history).
-    Replace with your own obs terms, scaling, and concatenation order.
-    """
-    s = raw_state["shooter"]
-    ball = raw_state["ball"]
 
-    root_quat = torch.tensor(s["root_quat"])
-    root_ang_vel = torch.tensor(s["root_ang_vel"])
-    joint_pos = torch.tensor(s["joint_pos"])
-    joint_vel = torch.tensor(s["joint_vel"])
-    ball_pos = torch.tensor(ball["pos"])
-    root_pos = torch.tensor(s["root_pos"])
-    last_action = torch.tensor(s["last_action"])
+class ShooterObsComputer:
+    """Reconstruct the 160-D Stage-II shooter actor observation from raw state."""
 
-    # Projected gravity
-    gravity_w = torch.tensor([0.0, 0.0, -1.0])
-    projected_gravity = quat_apply(quat_inv(root_quat), gravity_w)
+    def __init__(
+        self,
+        env: ManagerBasedRlEnv,
+        device: str,
+        shooter_motion_index: int | None = None,
+        aim_mode: str = "center",
+    ):
+        self.env = env
+        self.device = torch.device(device)
+        self.command = env.command_manager.get_term("motion")
+        self.default_joint_pos = (
+            env.scene["robot"].data.default_joint_pos[0].detach().clone().to(self.device)
+        )
+        action_term = env.action_manager.get_term("joint_pos")
+        self.action_scale = action_term._scale[0].detach().clone().to(self.device)
+        self.motion_count = int(self.command.motion.num_files)
+        self.motion_index_override = shooter_motion_index
+        self.aim_mode = aim_mode
+        self._reset_count = 0
+        self._motion_idx = 0
+        self._step = 0
+        self._target_locked = False
+        self._episode_target_world: torch.Tensor | None = None
+        self._action_offset_correction = torch.zeros(1, 29, device=self.device)
+        self.reset()
 
-    # Base angular velocity in robot frame
-    base_ang_vel = quat_apply(quat_inv(root_quat), root_ang_vel)
+    def reset(self) -> None:
+        if self.motion_index_override is None:
+            self._motion_idx = self._reset_count % self.motion_count
+            self._reset_count += 1
+        else:
+            self._motion_idx = int(self.motion_index_override) % self.motion_count
+        self._step = 0
+        self._target_locked = False
+        self._episode_target_world = None
+        self._action_offset_correction = self._compute_action_offset_correction()
 
-    # Joint positions relative to default
-    joint_pos_rel = joint_pos - _SHOOTER_DEFAULT_JOINT_POS
+    def _compute_action_offset_correction(self) -> torch.Tensor:
+        motion_idx = torch.tensor(self._motion_idx, dtype=torch.long, device=self.device)
+        initial_joint_pos = self.command.motion.joint_pos[motion_idx, 0]
+        correction = (initial_joint_pos - self.default_joint_pos) / self.action_scale
+        return correction.unsqueeze(0)
 
-    # Ball position in robot pelvis frame
-    ball_pos_local = quat_apply(quat_inv(root_quat), ball_pos - root_pos)
+    def adapt_action(self, action: torch.Tensor) -> torch.Tensor:
+        return action + self._action_offset_correction
 
-    obs = torch.cat([
-        base_ang_vel,           # 3
-        projected_gravity,      # 3
-        joint_pos_rel,          # 29
-        joint_vel,              # 29
-        last_action,            # 29
-        ball_pos_local,         # 3
-    ])
-    return obs.unsqueeze(0)  # (1, obs_dim)
+    def _reference_terms(self) -> tuple[torch.Tensor, torch.Tensor]:
+        motion = self.command.motion
+        motion_idx = torch.tensor(self._motion_idx, dtype=torch.long, device=self.device)
+        motion_len = int(motion.file_lengths[motion_idx].item())
+        step = min(self._step, max(0, motion_len - 1))
+        step_idx = torch.tensor(step, dtype=torch.long, device=self.device)
+
+        joint_pos_ref = motion.joint_pos[motion_idx, step_idx]
+        joint_vel_ref = motion.joint_vel[motion_idx, step_idx]
+        command = torch.cat([joint_pos_ref, joint_vel_ref], dim=-1)
+        motion_ref_ang_vel = motion.body_ang_vel_w[
+            motion_idx, step_idx, self.command.motion_anchor_body_index
+        ]
+        return command, motion_ref_ang_vel
+
+    def _goalkeeper_block_interval(self, raw_state: dict) -> tuple[float, float]:
+        goalkeeper = raw_state.get("goalkeeper")
+        if goalkeeper is None:
+            return (-0.35, 0.35)
+
+        gk_y = float(goalkeeper["root_pos"][1])
+        gk_z = float(goalkeeper["root_pos"][2])
+        root_quat = _tensor(goalkeeper["root_quat"], self.device)
+        gravity_w = torch.tensor([0.0, 0.0, -1.0], dtype=torch.float32, device=self.device)
+        projected_gravity = quat_apply(quat_inv(root_quat), gravity_w)
+        upright_score = float((-projected_gravity[2]).clamp(-1.0, 1.0).item())
+
+        if gk_z < 0.55 or upright_score < 0.45:
+            half_width = 0.95
+        else:
+            half_width = 0.55
+        return (gk_y - half_width, gk_y + half_width)
+
+    def _adaptive_goal_target_world(self, raw_state: dict) -> torch.Tensor:
+        block_min, block_max = self._goalkeeper_block_interval(raw_state)
+        candidates = (-1.15, -0.9, -0.7, 0.7, 0.9, 1.15)
+
+        def candidate_score(y: float) -> float:
+            if block_min <= y <= block_max:
+                clearance = -min(y - block_min, block_max - y)
+            elif y < block_min:
+                clearance = block_min - y
+            else:
+                clearance = y - block_max
+            return clearance + 0.05 * abs(y)
+
+        target_y = max(candidates, key=candidate_score)
+        return torch.tensor([-0.5, target_y, 0.11], dtype=torch.float32, device=self.device)
+
+    def _goal_target_world(self, raw_state: dict) -> torch.Tensor:
+        target_y = 0.0
+        if self.aim_mode == "open" and "goalkeeper" in raw_state:
+            gk_y = float(raw_state["goalkeeper"]["root_pos"][1])
+            target_y = -0.75 if gk_y > 0.0 else 0.75
+        elif self.aim_mode == "adaptive":
+            ball_vel = raw_state.get("ball", {}).get("vel", [0.0, 0.0, 0.0])
+            ball_speed = float(torch.linalg.norm(_tensor(ball_vel, self.device)).item())
+            if not self._target_locked:
+                self._episode_target_world = self._adaptive_goal_target_world(raw_state)
+                if ball_speed > 0.5 or self._step >= 50:
+                    self._target_locked = True
+            if self._episode_target_world is not None:
+                return self._episode_target_world
+        elif self.aim_mode not in ("center", "open"):
+            raise ValueError(f"Unsupported aim_mode: {self.aim_mode}")
+        return torch.tensor([-0.5, target_y, 0.11], dtype=torch.float32, device=self.device)
+
+    def __call__(self, raw_state: dict) -> torch.Tensor:
+        s = raw_state["shooter"]
+        ball = raw_state["ball"]
+
+        root_quat = _tensor(s["root_quat"], self.device)
+        root_ang_vel = _tensor(s["root_ang_vel"], self.device)
+        joint_pos = _tensor(s["joint_pos"], self.device)
+        joint_vel = _tensor(s["joint_vel"], self.device)
+        ball_pos = _tensor(ball["pos"], self.device)
+        root_pos = _tensor(s["root_pos"], self.device)
+        last_action = _tensor(s["last_action"], self.device)
+
+        command, motion_ref_ang_vel = self._reference_terms()
+        gravity_w = torch.tensor([0.0, 0.0, -1.0], dtype=torch.float32, device=self.device)
+        projected_gravity = quat_apply(quat_inv(root_quat), gravity_w)
+        base_ang_vel = quat_apply(quat_inv(root_quat), root_ang_vel)
+        joint_pos_rel = joint_pos - self.default_joint_pos
+        ball_pos_local = quat_apply(quat_inv(root_quat), ball_pos - root_pos)
+        goal_pos_local = quat_apply(
+            quat_inv(root_quat), self._goal_target_world(raw_state) - root_pos
+        )
+
+        obs = torch.cat([
+            command,              # 58
+            projected_gravity,    # 3
+            motion_ref_ang_vel,   # 3
+            base_ang_vel,         # 3
+            joint_pos_rel,        # 29
+            joint_vel,            # 29
+            last_action,          # 29
+            ball_pos_local,       # 3
+            goal_pos_local,       # 3
+        ])
+        self._step += 1
+        if obs.numel() != 160:
+            raise RuntimeError(f"Shooter obs must be 160-D, got {obs.numel()}")
+        return obs.unsqueeze(0)
 
 
 def compute_goalkeeper_obs(raw_state: dict) -> torch.Tensor:
@@ -263,13 +381,28 @@ def _load_policy(checkpoint_path: str, task_id: str, device: str) -> Any:
 # App factory
 # ---------------------------------------------------------------------------
 
-def create_app(checkpoint_path: str, task_id: str, device: str) -> FastAPI:
+def create_app(
+    checkpoint_path: str,
+    task_id: str,
+    device: str,
+    shooter_motion_index: int | None = None,
+    aim_mode: str = "center",
+) -> FastAPI:
     """Build the FastAPI app with a loaded policy and obs computer."""
 
     policy, env = _load_policy(checkpoint_path, task_id, device)
     policy_device = torch.device(device)
+    env_base = env.unwrapped
     is_gk = task_id == "Eval-Goalkeeper"
     history_len = 10 if is_gk else 1
+    shooter_obs_computer = None
+    if not is_gk:
+        shooter_obs_computer = ShooterObsComputer(
+            env_base,
+            device,
+            shooter_motion_index=shooter_motion_index,
+            aim_mode=aim_mode,
+        )
 
     # History buffer for goalkeeper's multi-frame observation stack.
     history: deque[torch.Tensor] = deque(maxlen=history_len)
@@ -335,7 +468,8 @@ def create_app(checkpoint_path: str, task_id: str, device: str) -> FastAPI:
                 frame = frame.clone()
                 frame[:, :3] = _GK_STATIC_GUARD_BALL_LOCAL.to(frame.device)
         else:
-            frame = compute_shooter_obs(raw_state)
+            assert shooter_obs_computer is not None
+            frame = shooter_obs_computer(raw_state)
 
         # Initialize history buffer on first frame after reset.
         if len(history) == 0:
@@ -356,6 +490,9 @@ def create_app(checkpoint_path: str, task_id: str, device: str) -> FastAPI:
 
         with torch.inference_mode():
             action = policy({"actor": stacked})
+            if not is_gk:
+                assert shooter_obs_computer is not None
+                action = shooter_obs_computer.adapt_action(action)
 
         if action.ndim != 2 or action.shape[-1] != env.num_actions:
             raise RuntimeError(
@@ -374,6 +511,8 @@ def create_app(checkpoint_path: str, task_id: str, device: str) -> FastAPI:
         reset_fn = getattr(policy, "reset", None)
         if callable(reset_fn):
             reset_fn()
+        if shooter_obs_computer is not None:
+            shooter_obs_computer.reset()
         with torch.inference_mode():
             env.reset()
         history.clear()
@@ -400,6 +539,10 @@ class ServerConfig:
     """Host to bind to."""
     device: str | None = None
     """Torch device (auto-detected if omitted)."""
+    shooter_motion_index: int | None = None
+    """Optional fixed soccer-standard motion index for shooter servers."""
+    aim_mode: str = "center"
+    """Shooter target selection: 'center', 'open', or 'adaptive'."""
 
 
 def main():
@@ -410,7 +553,13 @@ def main():
     task_id = "Eval-Shooter" if args.task == "shooter" else "Eval-Goalkeeper"
     device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    app = create_app(args.checkpoint, task_id, device)
+    app = create_app(
+        args.checkpoint,
+        task_id,
+        device,
+        shooter_motion_index=args.shooter_motion_index,
+        aim_mode=args.aim_mode,
+    )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
