@@ -94,12 +94,7 @@ _GK_STAND_GUARD_ACTION = (
 # Observation computation  (CUSTOMIZE: match your training observation space)
 # ---------------------------------------------------------------------------
 
-def compute_shooter_obs(
-    raw_state: dict,
-    *,
-    command_term: Any | None = None,
-    default_joint_pos: torch.Tensor | None = None,
-) -> torch.Tensor:
+def compute_shooter_obs(raw_state: dict) -> torch.Tensor:
     """Compute shooter observation tensor from raw state.
 
     Default: proprioception + ball position (~100-D, no history).
@@ -123,32 +118,19 @@ def compute_shooter_obs(
     # Base angular velocity in robot frame
     base_ang_vel = quat_apply(quat_inv(root_quat), root_ang_vel)
 
-    # Joint positions relative to the same default pose used by the eval env.
-    default = default_joint_pos if default_joint_pos is not None else _SHOOTER_DEFAULT_JOINT_POS
-    joint_pos_rel = joint_pos - default.cpu()
+    # Joint positions relative to default
+    joint_pos_rel = joint_pos - _SHOOTER_DEFAULT_JOINT_POS
 
-    # Ball and goal position in robot pelvis frame.
+    # Ball position in robot pelvis frame
     ball_pos_local = quat_apply(quat_inv(root_quat), ball_pos - root_pos)
-    goal_pos = torch.tensor([-0.5, 0.0, 0.0], dtype=torch.float32)
-    goal_pos_local = quat_apply(quat_inv(root_quat), goal_pos - root_pos)
-
-    if command_term is not None:
-        command = command_term.command[0].detach().cpu().to(torch.float32)
-        motion_ref_ang_vel = command_term.anchor_ang_vel_w[0].detach().cpu().to(torch.float32)
-    else:
-        command = torch.zeros(58, dtype=torch.float32)
-        motion_ref_ang_vel = torch.zeros(3, dtype=torch.float32)
 
     obs = torch.cat([
-        command,                # 58
-        projected_gravity,      # 3
-        motion_ref_ang_vel,     # 3
         base_ang_vel,           # 3
+        projected_gravity,      # 3
         joint_pos_rel,          # 29
         joint_vel,              # 29
         last_action,            # 29
         ball_pos_local,         # 3
-        goal_pos_local,         # 3
     ])
     return obs.unsqueeze(0)  # (1, obs_dim)
 
@@ -286,17 +268,8 @@ def create_app(checkpoint_path: str, task_id: str, device: str) -> FastAPI:
 
     policy, env = _load_policy(checkpoint_path, task_id, device)
     policy_device = torch.device(device)
-    env_base = env.unwrapped
     is_gk = task_id == "Eval-Goalkeeper"
     history_len = 10 if is_gk else 1
-    shooter_default_joint_pos = None
-    if not is_gk:
-        shooter_default_joint_pos = (
-            env_base.scene["robot"].data.default_joint_pos[0]
-            .detach()
-            .cpu()
-            .to(torch.float32)
-        )
 
     # History buffer for goalkeeper's multi-frame observation stack.
     history: deque[torch.Tensor] = deque(maxlen=history_len)
@@ -362,12 +335,7 @@ def create_app(checkpoint_path: str, task_id: str, device: str) -> FastAPI:
                 frame = frame.clone()
                 frame[:, :3] = _GK_STATIC_GUARD_BALL_LOCAL.to(frame.device)
         else:
-            env_base.command_manager.compute(dt=env_base.step_dt)
-            frame = compute_shooter_obs(
-                raw_state,
-                command_term=env_base.command_manager.get_term("motion"),
-                default_joint_pos=shooter_default_joint_pos,
-            )
+            frame = compute_shooter_obs(raw_state)
 
         # Initialize history buffer on first frame after reset.
         if len(history) == 0:

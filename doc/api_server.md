@@ -33,16 +33,15 @@ joint_pos_frame0..9, joint_vel_frame0..9, actions_frame0..9
 
 `GoalkeeperActorCritic` 内部会基于这个 term-major 布局再转换为按帧的 history embedding。如果 API server 传入 frame-major，网络看到的各个 observation term 会错位，表现为 Phase 2 中 goalkeeper 姿态扭曲、乱动或倒地，而同一个 checkpoint 在原始 eval 脚本中正常。现在脚本通过 `stack_goalkeeper_history_term_major()` 显式重建 mjlab 的 term-major 布局。
 
-3. 对齐 shooter observation
+3. 使用 main 分支的 shooter observation
 
-Shooter 分支不再使用简化 proprioception，而是从 raw state 加上服务器内部 eval env 的 command term，构造包含以下内容的 observation：
+Shooter 分支已切回 main 分支提供的 raw-state API 逻辑，不再额外从服务器内部 eval env 读取 `command`、`motion_ref_ang_vel` 或 `goal_pos_local`。当前 observation 为 96 维：
 
 ```text
-command, projected_gravity, motion_ref_ang_vel, base_ang_vel,
-joint_pos_rel, joint_vel, last_action, ball_pos_local, goal_pos_local
+base_ang_vel, projected_gravity, joint_pos_rel, joint_vel, last_action, ball_pos_local
 ```
 
-其中 `joint_pos_rel` 使用 eval env 中 robot 的 default joint position，`goal_pos_local` 使用 Phase 2 球门位置 `(-0.5, 0, 0)`。
+其中 `joint_pos_rel` 使用零位 `_SHOOTER_DEFAULT_JOINT_POS` 作为默认关节角。这一部分与 main 分支 shooter API 保持一致；本文件中的额外修复主要保留在 goalkeeper observation、history stacking 和 `/reset` 逻辑上。
 
 4. 修正 `/reset`
 
