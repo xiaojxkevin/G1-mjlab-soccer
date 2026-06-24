@@ -1,7 +1,5 @@
 """Run one CS2810 Phase 2 match with Viser visualization and JSON results."""
 
-from __future__ import annotations
-
 import json
 import math
 import os
@@ -14,6 +12,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+# Use EGL for headless offscreen rendering (must be set before any MuJoCo import).
+os.environ.setdefault("MUJOCO_GL", "egl")
+
+import numpy as np
 import requests
 import torch
 import tyro
@@ -31,6 +33,7 @@ from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.utils.torch import configure_torch_backends
+from mjlab.utils.wrappers.video_recorder import VideoRecorder
 from mjlab.viewer import ViserPlayViewer, ViewerConfig
 
 from src.assets.robots import G1_ACTION_SCALE, get_g1_robot_cfg
@@ -238,10 +241,13 @@ def make_compete_env_cfg(config: dict[str, Any]) -> ManagerBasedRlEnvCfg:
             "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
         },
         viewer=ViewerConfig(
-            lookat=(2.0, 0.0, 1.0),
-            distance=6.0,
-            elevation=-15.0,
+            lookat=(0.0, 0.0, 0.0),
+            distance=7.0,
+            elevation=-25.0,
             azimuth=90.0,
+            fovy=50.0,
+            height=480,
+            width=640,
         ),
         sim=SimulationCfg(
             nconmax=int(sim_cfg["nconmax"]),
@@ -346,6 +352,20 @@ class PassiveViserViewer(ViserPlayViewer):
 
     def setup(self) -> None:
         super().setup()
+        # MuJoCo mjvCamera and Viser compute camera position from (azimuth,
+        # elevation, distance) with different formulas that produce the same
+        # location when azimuth differs by 90°.  The ViewerConfig azimuth is
+        # set for the offscreen (MuJoCo) renderer (azimuth=90 = +x side), so
+        # we manually position the Viser camera at the same world-space
+        # location using Viser's own formula with azimuth=180.
+        _el = np.deg2rad(self.cfg.elevation)
+        _cam_pos = (
+            -np.array([-np.cos(_el), 0.0, np.sin(_el)]) * self.cfg.distance
+        )
+        for client in self._server.get_clients().values():
+            client.camera.position = _cam_pos
+            client.camera.look_at = np.zeros(3)
+
         if self._scoreboard is not None:
             import viser
 
@@ -625,15 +645,6 @@ def wait_for_start(
     print("[INFO] Start Trials pressed; beginning official trials.", flush=True)
 
 
-def _default_results_path(cfg: "CompeteConfig", timestamp: str) -> Path:
-    DEFAULT_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    match_name = cfg.match_id or (
-        f"{_sanitize(cfg.shooter_team)}_shooter_vs_"
-        f"{_sanitize(cfg.goalkeeper_team)}_goalkeeper"
-    )
-    return DEFAULT_RESULTS_DIR / f"{timestamp}_{_sanitize(match_name)}.json"
-
-
 def _write_result(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -674,16 +685,46 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
     step_dt = float(config["sim"]["timestep"]) * int(config["sim"]["decimation"])
     max_steps = int(round(float(config["episode_length_s"]) / step_dt))
     timestamp = _utc_timestamp()
-    result_path = Path(cfg.results_json) if cfg.results_json else _default_results_path(cfg, timestamp)
 
-    print(f"[INFO] Match id: {cfg.match_id or result_path.stem}", flush=True)
+    # Determine match identity and output paths.
+    match_name = cfg.match_id or (
+        f"{_sanitize(cfg.shooter_team)}_shooter_vs_"
+        f"{_sanitize(cfg.goalkeeper_team)}_goalkeeper"
+    )
+    match_id = f"{timestamp}_{_sanitize(match_name)}"
+    match_dir = DEFAULT_RESULTS_DIR / match_id
+    match_dir.mkdir(parents=True, exist_ok=True)
+    result_path = Path(cfg.results_json) if cfg.results_json else (match_dir / "result.json")
+
+    print(f"[INFO] Match id: {match_id}", flush=True)
     print(f"[INFO] Device: {device}", flush=True)
     print(f"[INFO] Viser: http://{cfg.viser_host}:{cfg.viser_port}", flush=True)
 
     env_cfg = make_compete_env_cfg(config)
-    env_base = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
-    act_dim_shooter = env_base.action_manager.get_term("shooter_joint_pos").action_dim
-    act_dim_goalkeeper = env_base.action_manager.get_term("goalkeeper_joint_pos").action_dim
+    # Ensure ViewerConfig resolution matches the env_cfg (already set in make_compete_env_cfg)
+    # EGL contexts are thread-local, so we create the renderer in the main thread
+    # but immediately close it.  It will be re-initialised inside the worker thread.
+    env_base_raw = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode="rgb_array")
+    env_base_raw._offline_renderer.close()
+    env_base_raw._offline_renderer = None
+    act_dim_shooter = env_base_raw.action_manager.get_term("shooter_joint_pos").action_dim
+    act_dim_goalkeeper = env_base_raw.action_manager.get_term("goalkeeper_joint_pos").action_dim
+
+    # Set up video recording — everything lives under the match directory.
+    video_folder = match_dir / "videos"
+    video_folder.mkdir(parents=True, exist_ok=True)
+    env_base = VideoRecorder(
+        env_base_raw,
+        video_folder=video_folder,
+        episode_trigger=lambda ep: True,
+        video_length=max_steps,
+        disable_logger=True,
+    )
+    print(f"[INFO] Video recording: {video_folder}", flush=True)
+
+    # Disable real-time pacing in no-viewer mode for max throughput
+    if cfg.no_viewer:
+        cfg.realtime = False
 
     shooter_policy: Any
     goalkeeper_policy: Any
@@ -709,6 +750,17 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
         )
 
         def _worker() -> None:
+            # Re-initialise offscreen renderer in *this* thread so the EGL
+            # context belongs to the worker thread where VideoRecorder calls
+            # render() during env.step().
+            from mjlab.viewer import OffscreenRenderer
+
+            env_base_raw._offline_renderer = OffscreenRenderer(
+                model=env_base_raw.sim.mj_model,
+                cfg=env_base_raw.cfg.viewer,
+                scene=env_base_raw.scene,
+            )
+            env_base_raw._offline_renderer.initialize()
             try:
                 wait_for_start(
                     start_event,
@@ -740,6 +792,13 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
                 result_holder["fatal_error"] = str(exc)
                 print(f"[FATAL] {exc}", flush=True)
             finally:
+                # Clean up the worker-thread EGL renderer.
+                try:
+                    if env_base_raw._offline_renderer is not None:
+                        env_base_raw._offline_renderer.close()
+                        env_base_raw._offline_renderer = None
+                except Exception:
+                    pass
                 if "summary" not in result_holder:
                     scoreboard.set_phase("failed")
                 done_event.set()
@@ -776,9 +835,14 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
             done_event.wait()
 
         worker.join(timeout=5.0)
+        # Collect recorded video paths (relative to results dir for direct URL use)
+        video_paths = sorted(
+            f"{match_id}/videos/{p.name}"
+            for p in video_folder.glob("*.mp4")
+        )
         payload = {
             "timestamp": timestamp,
-            "match_id": cfg.match_id or result_path.stem,
+            "match_id": match_id,
             "teams": {
                 "shooter": cfg.shooter_team,
                 "goalkeeper": cfg.goalkeeper_team,
@@ -788,17 +852,27 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
                 "goalkeeper": cfg.goalkeeper_api,
             },
             "minimal_config_audit": _minimal_config_audit(config, max_steps),
+            "videos": video_paths,
             **result_holder,
         }
         _write_result(result_path, payload)
         return payload
     except Exception as exc:
+        # Try to collect any videos that were recorded before the crash
+        try:
+            video_paths_err = sorted(
+                f"{match_id}/videos/{p.name}"
+                for p in video_folder.glob("*.mp4")
+            )
+        except Exception:
+            video_paths_err = []
         payload = {
             "timestamp": timestamp,
-            "match_id": cfg.match_id or result_path.stem,
+            "match_id": match_id,
             "teams": {"shooter": cfg.shooter_team, "goalkeeper": cfg.goalkeeper_team},
             "apis": {"shooter": cfg.shooter_api, "goalkeeper": cfg.goalkeeper_api},
             "minimal_config_audit": _minimal_config_audit(config, max_steps),
+            "videos": video_paths_err,
             "summary": {
                 "num_trials": cfg.num_trials,
                 "goals": 0,

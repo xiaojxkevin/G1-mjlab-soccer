@@ -17,6 +17,7 @@ import uvicorn
 import yaml
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 
@@ -76,6 +77,7 @@ class Match:
     result_path: str | None = None
     returncode: int | None = None
     summary: dict[str, Any] | None = None
+    video_paths: list[str] | None = None
     error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -97,6 +99,7 @@ class Match:
             "result_path": self.result_path,
             "returncode": self.returncode,
             "summary": self.summary,
+            "video_paths": self.video_paths,
             "error": self.error,
         }
 
@@ -198,8 +201,11 @@ class MatchManager:
         match.slot_name = slot.name
         match.viser_url = slot.external_url
 
-        log_path = LOG_DIR / f"{match.match_id}.log"
-        result_path = RESULT_DIR / f"{match.match_id}.json"
+        # Everything for a match lives in one folder under results/.
+        match_dir = RESULT_DIR / match.match_id
+        match_dir.mkdir(parents=True, exist_ok=True)
+        log_path = match_dir / "match.log"
+        result_path = match_dir / "result.json"
         match.log_path = str(log_path)
         match.result_path = str(result_path)
 
@@ -272,6 +278,7 @@ class MatchManager:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             match.summary = data.get("summary")
+            match.video_paths = data.get("videos")
             match.error = data.get("fatal_error")
         except Exception as exc:
             match.error = f"failed to read result json: {exc}"
@@ -300,6 +307,10 @@ def create_app(config: dict[str, Any]) -> FastAPI:
     manager = MatchManager(config)
     app = FastAPI(title="CS2810 Phase 2 Tournament Console")
     app.state.manager = manager
+
+    # Mount results directory so recorded MP4s are viewable from the web console.
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    app.mount("/results", StaticFiles(directory=str(RESULT_DIR)), name="results")
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -446,6 +457,12 @@ async function refresh() {
   for (const m of matches) {
     const tr = document.createElement("tr");
     const summary = m.summary ? `goals=${m.summary.goals}, gk=${m.summary.goalkeeper_wins}, winner=${m.summary.winner_decision}` : "";
+    const videosHtml = (m.video_paths && m.video_paths.length > 0)
+      ? m.video_paths.map((v, i) => {
+          const name = v.split('/').pop();
+          return `<a href="/results/${v}" target="_blank"><button class="secondary" style="background:#7c3aed;" title="Trial ${i+1}">🎬 T${i+1}</button></a>`;
+        }).join(' ')
+      : "";
     tr.innerHTML = `
       <td><span class="pill ${m.status}">${m.status}</span></td>
       <td><code>${m.match_id}</code><br>${m.shooter_team} shooter vs ${m.goalkeeper_team} goalkeeper</td>
@@ -456,6 +473,7 @@ async function refresh() {
         <button class="secondary" onclick="selectMatch('${m.match_id}')">Logs</button>
         ${m.result_path ? `<a href="/api/matches/${m.match_id}/result" target="_blank"><button class="secondary">JSON</button></a>` : ""}
         ${(m.status === "running" || m.status === "queued") ? `<button class="danger" onclick="stopMatch('${m.match_id}')">Stop</button>` : ""}
+        ${videosHtml}
       </td>`;
     tbody.appendChild(tr);
   }
