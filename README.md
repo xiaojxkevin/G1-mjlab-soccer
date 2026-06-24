@@ -49,6 +49,7 @@ python scripts/eval_naive_goalkeeper.py --headless --num-trials 50 --checkpoint 
 python phase2/api_server.py --checkpoint <shooter.pt> --port 8000 --task shooter
 python phase2/api_server.py --checkpoint <goalkeeper.pt> --port 8001 --task goalkeeper
 
+# Tournament server web console: set Viewer / Save Video with the checkboxes.
 # See phase2/README_CLIENT.md for student API submission.
 # See phase2/README_SERVER.md for tournament-server deployment.
 ```

@@ -23,7 +23,6 @@ from pydantic import BaseModel
 
 PHASE2_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PHASE2_DIR / "phase2_config.yaml"
-LOG_DIR = PHASE2_DIR / "logs"
 RESULT_DIR = PHASE2_DIR / "results"
 
 
@@ -48,6 +47,8 @@ class MatchRequest(BaseModel):
     goalkeeper_api: str
     num_trials: int = 10
     match_id: str | None = None
+    viewer_enabled: bool = True
+    save_video: bool = True
 
 
 @dataclass
@@ -78,6 +79,8 @@ class Match:
     returncode: int | None = None
     summary: dict[str, Any] | None = None
     video_paths: list[str] | None = None
+    viewer_enabled: bool = True
+    save_video: bool = True
     error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -100,6 +103,8 @@ class Match:
             "returncode": self.returncode,
             "summary": self.summary,
             "video_paths": self.video_paths,
+            "viewer_enabled": self.viewer_enabled,
+            "save_video": self.save_video,
             "error": self.error,
         }
 
@@ -119,7 +124,6 @@ class MatchManager:
             for slot in config["viser_slots"]
         ]
         self.lock = asyncio.Lock()
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
         RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
     def _make_match_id(self, req: MatchRequest) -> str:
@@ -153,6 +157,8 @@ class MatchManager:
                 goalkeeper_team=req.goalkeeper_team,
                 goalkeeper_api=req.goalkeeper_api,
                 num_trials=req.num_trials,
+                viewer_enabled=req.viewer_enabled,
+                save_video=req.save_video,
             )
             self.matches[match_id] = match
             self.queue.append(match_id)
@@ -233,6 +239,10 @@ class MatchManager:
             "--viser-port",
             str(slot.port),
         ]
+        if not match.viewer_enabled:
+            cmd.append("--no-viewer")
+        if not match.save_video:
+            cmd.append("--no-save-video")
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
         log_file = log_path.open("w", encoding="utf-8")
@@ -328,7 +338,12 @@ def create_app(config: dict[str, Any]) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
-        return _INDEX_HTML.replace("__WEB_EXTERNAL_URL__", config["web"]["external_url"])
+        html = _INDEX_HTML.replace("__WEB_EXTERNAL_URL__", config["web"]["external_url"])
+        html = html.replace(
+            "__VIEWER_CHECKED__",
+            "checked",
+        )
+        return html
 
     @app.post("/api/matches")
     async def create_match(req: MatchRequest) -> dict[str, Any]:
@@ -367,29 +382,53 @@ _INDEX_HTML = """
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CS2810 Phase 2</title>
   <style>
-    body { margin: 0; font-family: Arial, sans-serif; background: #f6f7f9; color: #20242a; }
-    header { background: #1f2937; color: white; padding: 16px 24px; }
-    main { max-width: 1180px; margin: 0 auto; padding: 20px; }
-    section { background: white; border: 1px solid #d9dee7; border-radius: 6px; padding: 16px; margin-bottom: 18px; }
+    :root {
+      --bg: #eef2f7;
+      --panel: #ffffff;
+      --panel-border: #dbe2ea;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --header: #111827;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --danger: #dc2626;
+      --shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 10px 24px rgba(15, 23, 42, 0.04);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+    header { background: linear-gradient(180deg, #111827 0%, #1f2937 100%); color: white; padding: 20px 28px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+    main { max-width: 1240px; margin: 0 auto; padding: 20px; }
+    section { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; padding: 18px; margin-bottom: 18px; box-shadow: var(--shadow); }
     h1 { font-size: 22px; margin: 0 0 4px; }
-    h2 { font-size: 17px; margin: 0 0 12px; }
-    label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 4px; }
-    input { width: 100%; box-sizing: border-box; padding: 9px; border: 1px solid #c8ced8; border-radius: 4px; }
-    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-    .row { display: grid; grid-template-columns: 1fr 1fr 120px; gap: 12px; align-items: end; }
-    button { background: #2563eb; color: white; border: 0; border-radius: 4px; padding: 10px 12px; cursor: pointer; }
+    h2 { font-size: 17px; margin: 0 0 14px; }
+    label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 6px; color: #111827; }
+    input { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #cdd6e1; border-radius: 8px; background: #f8fafc; color: var(--text); }
+    input:focus { outline: none; border-color: #93c5fd; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12); background: #fff; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto auto; gap: 12px; align-items: end; margin-top: 20px; }
+    .toggle { display: flex; align-items: center; gap: 8px; padding-bottom: 2px; white-space: nowrap; }
+    .toggle input { width: 18px; height: 18px; margin: 0; accent-color: var(--primary); }
+    button { background: var(--primary); color: white; border: 0; border-radius: 8px; padding: 11px 16px; cursor: pointer; font-weight: 700; }
+    button:hover { background: var(--primary-hover); }
     button.secondary { background: #4b5563; }
-    button.danger { background: #b91c1c; }
+    button.secondary:hover { background: #374151; }
+    button.danger { background: var(--danger); }
+    button.danger:hover { background: #b91c1c; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: left; vertical-align: top; }
-    th { background: #f3f4f6; }
+    th, td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { background: #f8fafc; color: #111827; font-size: 12px; text-transform: uppercase; letter-spacing: 0.02em; }
     code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    pre { white-space: pre-wrap; background: #101827; color: #d1d5db; padding: 12px; border-radius: 4px; min-height: 120px; }
-    .muted { color: #6b7280; }
-    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #e5e7eb; }
+    pre { white-space: pre-wrap; background: #0f172a; color: #dbe4f0; padding: 14px; border-radius: 10px; min-height: 180px; margin: 12px 0 0; border: 1px solid #1e293b; }
+    .muted { color: var(--muted); }
+    .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; background: #e5e7eb; font-size: 12px; font-weight: 700; text-transform: capitalize; }
     .running { background: #dbeafe; }
     .done { background: #dcfce7; }
     .failed, .stopped { background: #fee2e2; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+    .field-span { display: flex; flex-direction: column; justify-content: end; }
+    .full-span { grid-column: 1 / -1; }
+    .notes { font-size: 12px; color: var(--muted); margin-top: 10px; }
   </style>
 </head>
 <body>
@@ -407,11 +446,14 @@ _INDEX_HTML = """
           <div><label>Goalkeeper Team</label><input id="goalkeeper_team" required></div>
           <div><label>Goalkeeper API URL</label><input id="goalkeeper_api" required placeholder="http://host:port"></div>
         </div>
-        <div class="row" style="margin-top:20px;">
+        <div class="row">
           <div><label>Match ID (optional)</label><input id="match_id"></div>
           <div><label>Trials</label><input id="num_trials" type="number" min="1" value="10"></div>
-          <button type="submit">Start Match</button>
+          <div class="toggle"><input id="viewer_enabled" type="checkbox" __VIEWER_CHECKED__><label for="viewer_enabled" style="margin:0;">Enable Viewer</label></div>
+          <div class="toggle"><input id="save_video" type="checkbox" checked><label for="save_video" style="margin:0;">Save Video</label></div>
+          <div><button type="submit" style="width:100%;">Start Match</button></div>
         </div>
+        <div class="notes">Viewer controls the live Viser window; Save Video controls MP4 recording only.</div>
       </form>
     </section>
     <section>
@@ -438,7 +480,9 @@ document.getElementById("match-form").addEventListener("submit", async (event) =
     goalkeeper_team: document.getElementById("goalkeeper_team").value,
     goalkeeper_api: document.getElementById("goalkeeper_api").value,
     num_trials: Number(document.getElementById("num_trials").value || 10),
-    match_id: document.getElementById("match_id").value || null
+    match_id: document.getElementById("match_id").value || null,
+    viewer_enabled: document.getElementById("viewer_enabled").checked,
+    save_video: document.getElementById("save_video").checked
   };
   const resp = await fetch("/api/matches", {
     method: "POST",
@@ -508,6 +552,7 @@ setInterval(refresh, 2000);
 class ServerConfig:
     host: str | None = None
     port: int | None = None
+    viewer_enabled: bool = True
 
 
 def main() -> None:

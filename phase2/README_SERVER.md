@@ -36,6 +36,8 @@ Open the web console and submit:
 - Goalkeeper team name
 - Goalkeeper API URL
 - Number of trials, default `10`
+- Viewer checkbox in the web console
+- Save Video checkbox in the web console
 
 The API URLs must be reachable from this tournament server.
 
@@ -43,7 +45,9 @@ The API URLs must be reachable from this tournament server.
 
 - Each episode lasts `5s`.
 - The runner waits on the Viser `Start Trials` button before official trials
-  begin.
+  begin when the viewer is enabled.
+- Without the viewer, trials start automatically.
+- Video recording can be disabled from the web console to isolate renderer cost.
 - Up to 4 matches run concurrently, one per Viser slot.
 - Viser displays a Match Scoreboard panel with current trial and prior trial
   outcomes: `S` for shooter goal and `G` for goalkeeper save.
@@ -101,12 +105,12 @@ The returned action must contain exactly 29 floats.
 Each match writes:
 
 ```text
-phase2/results/<match_id>.json
-phase2/logs/<match_id>.log
+phase2/results/<match_id>/result.json
+phase2/results/<match_id>/match.log
 ```
 
 The JSON includes timestamp, team names, API URLs, minimal config audit,
-per-trial results, and summary.
+per-trial results (including each trial's elapsed wall-clock time), and summary.
 
 ## Client Smoke Test
 

@@ -16,6 +16,7 @@ from typing import Any
 os.environ.setdefault("MUJOCO_GL", "egl")
 
 import numpy as np
+import mediapy as media
 import requests
 import torch
 import tyro
@@ -78,40 +79,140 @@ def _vec3(values: list[float] | tuple[float, float, float]) -> tuple[float, floa
     return (float(values[0]), float(values[1]), float(values[2]))
 
 
+
+def _copy_tensor_1d_to_list(tensor: torch.Tensor) -> list[float]:
+    return tensor.detach().cpu().tolist()
+
+
+class _TimedVideoRecorder(VideoRecorder):
+    def __init__(
+        self,
+        *args: Any,
+        step_dt: float,
+        capture_fps: float = 24.0,
+        **kwargs: Any,
+    ):
+        super().__init__(*args, **kwargs)
+        self._step_dt = step_dt
+        self._capture_interval_s = 1.0 / capture_fps if capture_fps > 0 else 0.0
+        self._capture_fps = capture_fps
+        self._sim_time_s = 0.0
+        self._next_capture_s = 0.0
+        self._write_threads: list[threading.Thread] = []
+        self._write_errors: list[BaseException] = []
+        self._write_lock = threading.Lock()
+
+    def _start_recording(self) -> None:
+        super()._start_recording()
+        self._sim_time_s = 0.0
+        self._next_capture_s = 0.0
+
+    def step(self, action: torch.Tensor) -> Any:
+        if self.is_recording:
+            self._sim_time_s += self._step_dt
+        return super().step(action)
+
+    def _record_frame(self) -> None:
+        if self._wrapped_env.render_mode == "rgb_array":
+            if self._sim_time_s < self._next_capture_s:
+                return
+            while self._next_capture_s <= self._sim_time_s:
+                self._next_capture_s += self._capture_interval_s
+            frame = self._wrapped_env.render()
+            if frame is not None:
+                rgb_frame = (
+                    frame[0] if isinstance(frame, np.ndarray) and frame.ndim == 4 else frame
+                )
+                self.current_video_frames.append(rgb_frame)
+
+    def _finish_recording(self) -> None:
+        if self.current_video_frames:
+            video_frames = []
+            for frame in self.current_video_frames:
+                frame = np.asarray(frame) if not isinstance(frame, np.ndarray) else frame
+                if frame.dtype != np.uint8:
+                    frame = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
+                video_frames.append(frame)
+
+            fps = int(round(self._capture_fps)) if self._capture_fps > 0 else self._wrapped_env.metadata.get("render_fps", 30)
+            video_path = str(self.current_video_path)
+            disable_logger = self.disable_logger
+            def _write_video() -> None:
+                try:
+                    media.write_video(video_path, video_frames, fps=fps)
+                    if not disable_logger:
+                        print(f"[INFO] Saved video to {video_path}")
+                except BaseException as exc:
+                    with self._write_lock:
+                        self._write_errors.append(exc)
+
+            thread = threading.Thread(
+                target=_write_video,
+                name=f"video-write-{self.video_count}",
+                daemon=True,
+            )
+            thread.start()
+            self._write_threads.append(thread)
+
+        self.is_recording = False
+        self.current_video_frames = []
+        self.current_video_path = None
+        self.video_count += 1
+        self.trigger_type = None
+
+    def finish_trial(self) -> None:
+        if self.is_recording:
+            self._finish_recording()
+
+    def wait_for_writes(self) -> None:
+        for thread in self._write_threads:
+            thread.join()
+        if self._write_errors:
+            raise self._write_errors[0]
+
+
 def _build_raw_state(
     env_base: ManagerBasedRlEnv,
     prev_action_shooter: torch.Tensor,
     prev_action_gk: torch.Tensor,
+    raw_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scene = env_base.scene
     shooter = scene["shooter"]
     goalkeeper = scene["goalkeeper"]
     ball = scene["ball"]
 
-    def _robot_state(robot) -> dict[str, Any]:
-        return {
-            "root_pos": robot.data.root_link_pos_w[0].cpu().tolist(),
-            "root_quat": robot.data.root_link_quat_w[0].cpu().tolist(),
-            "root_lin_vel": robot.data.root_link_lin_vel_w[0].cpu().tolist(),
-            "root_ang_vel": robot.data.root_link_ang_vel_w[0].cpu().tolist(),
-            "joint_pos": robot.data.joint_pos[0].cpu().tolist(),
-            "joint_vel": robot.data.joint_vel[0].cpu().tolist(),
+    if raw_state is None:
+        raw_state = {
+            "shooter": {},
+            "goalkeeper": {},
+            "ball": {},
         }
 
-    return {
-        "shooter": {
-            **_robot_state(shooter),
-            "last_action": prev_action_shooter[0].cpu().tolist(),
-        },
-        "goalkeeper": {
-            **_robot_state(goalkeeper),
-            "last_action": prev_action_gk[0].cpu().tolist(),
-        },
-        "ball": {
-            "pos": ball.data.root_link_pos_w[0].cpu().tolist(),
-            "vel": ball.data.root_link_vel_w[0, :3].cpu().tolist(),
-        },
-    }
+    shooter_state = raw_state["shooter"]
+    goalkeeper_state = raw_state["goalkeeper"]
+    ball_state = raw_state["ball"]
+
+    shooter_state["root_pos"] = _copy_tensor_1d_to_list(shooter.data.root_link_pos_w[0])
+    shooter_state["root_quat"] = _copy_tensor_1d_to_list(shooter.data.root_link_quat_w[0])
+    shooter_state["root_lin_vel"] = _copy_tensor_1d_to_list(shooter.data.root_link_lin_vel_w[0])
+    shooter_state["root_ang_vel"] = _copy_tensor_1d_to_list(shooter.data.root_link_ang_vel_w[0])
+    shooter_state["joint_pos"] = _copy_tensor_1d_to_list(shooter.data.joint_pos[0])
+    shooter_state["joint_vel"] = _copy_tensor_1d_to_list(shooter.data.joint_vel[0])
+    shooter_state["last_action"] = _copy_tensor_1d_to_list(prev_action_shooter[0])
+
+    goalkeeper_state["root_pos"] = _copy_tensor_1d_to_list(goalkeeper.data.root_link_pos_w[0])
+    goalkeeper_state["root_quat"] = _copy_tensor_1d_to_list(goalkeeper.data.root_link_quat_w[0])
+    goalkeeper_state["root_lin_vel"] = _copy_tensor_1d_to_list(goalkeeper.data.root_link_lin_vel_w[0])
+    goalkeeper_state["root_ang_vel"] = _copy_tensor_1d_to_list(goalkeeper.data.root_link_ang_vel_w[0])
+    goalkeeper_state["joint_pos"] = _copy_tensor_1d_to_list(goalkeeper.data.joint_pos[0])
+    goalkeeper_state["joint_vel"] = _copy_tensor_1d_to_list(goalkeeper.data.joint_vel[0])
+    goalkeeper_state["last_action"] = _copy_tensor_1d_to_list(prev_action_gk[0])
+
+    ball_state["pos"] = _copy_tensor_1d_to_list(ball.data.root_link_pos_w[0])
+    ball_state["vel"] = _copy_tensor_1d_to_list(ball.data.root_link_vel_w[0, :3])
+
+    return raw_state
 
 
 def _make_shooter_robot(config: dict[str, Any]) -> Any:
@@ -241,10 +342,13 @@ def make_compete_env_cfg(config: dict[str, Any]) -> ManagerBasedRlEnvCfg:
             "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
         },
         viewer=ViewerConfig(
-            lookat=(0.0, 0.0, 0.0),
-            distance=7.0,
-            elevation=-25.0,
-            azimuth=90.0,
+            origin_type=ViewerConfig.OriginType.ASSET_BODY,
+            entity_name="shooter",
+            body_name="torso_link",
+            lookat=(0.0, 0.0, 1.0),
+            distance=4.3,
+            elevation=-8.0,
+            azimuth=195.0,
             fovy=50.0,
             height=480,
             width=640,
@@ -305,6 +409,33 @@ class ApiPolicy:
             pass
 
 
+def _call_policies_parallel(
+    shooter_policy: Any,
+    goalkeeper_policy: Any,
+    raw_state: dict[str, Any],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    results: dict[str, torch.Tensor] = {}
+    errors: list[BaseException] = []
+
+    def _run(name: str, policy: Any) -> None:
+        try:
+            results[name] = policy(raw_state)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=_run, args=("shooter", shooter_policy), daemon=True),
+        threading.Thread(target=_run, args=("goalkeeper", goalkeeper_policy), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[0]
+    return results["shooter"], results["goalkeeper"]
+
+
 class CombinedPolicy:
     def __init__(
         self,
@@ -318,9 +449,15 @@ class CombinedPolicy:
         self._env_base = env_base
         self._prev_action_s = torch.zeros(1, 29, device=device)
         self._prev_action_g = torch.zeros(1, 29, device=device)
+        self._raw_state_cache: dict[str, Any] = {"shooter": {}, "goalkeeper": {}, "ball": {}}
 
     def __call__(self, _obs: dict[str, Any]) -> torch.Tensor:
-        raw = _build_raw_state(self._env_base, self._prev_action_s, self._prev_action_g)
+        raw = _build_raw_state(
+            self._env_base,
+            self._prev_action_s,
+            self._prev_action_g,
+            self._raw_state_cache,
+        )
         s_act = self._shooter(raw)
         g_act = self._goalkeeper(raw)
         self._prev_action_s = s_act.detach().clone()
@@ -349,22 +486,31 @@ class PassiveViserViewer(ViserPlayViewer):
         self._start_event = start_event
         self._scoreboard_html = None
         self._start_button = None
+        self._render_interval_s = 1.0 / 24.0
+        self._next_render_at = 0.0
 
     def setup(self) -> None:
         super().setup()
-        # MuJoCo mjvCamera and Viser compute camera position from (azimuth,
-        # elevation, distance) with different formulas that produce the same
-        # location when azimuth differs by 90°.  The ViewerConfig azimuth is
-        # set for the offscreen (MuJoCo) renderer (azimuth=90 = +x side), so
-        # we manually position the Viser camera at the same world-space
-        # location using Viser's own formula with azimuth=180.
-        _el = np.deg2rad(self.cfg.elevation)
-        _cam_pos = (
-            -np.array([-np.cos(_el), 0.0, np.sin(_el)]) * self.cfg.distance
-        )
+        # Put the viewer behind the shooter so the ball travels toward the goal
+        # in the direction the camera is facing. The fixed tournament scene uses
+        # shooter at +x, goalkeeper at the origin, and goal at -x.
+        _cam_pos = np.array([8.8, -0.8, 2.2])
+        _look_at = np.array([1.8, 0.0, 0.9])
+
+        # Disable the built-in camera tracking so it doesn't reset our
+        # position whenever a client connects or the checkbox is toggled.
+        self._scene.camera_tracking_enabled = False
+
+        # Override camera for already-connected clients.
         for client in self._server.get_clients().values():
             client.camera.position = _cam_pos
-            client.camera.look_at = np.zeros(3)
+            client.camera.look_at = _look_at
+
+        # Override camera for any client that connects later.
+        @self._server.on_client_connect
+        def _(_client):
+            _client.camera.position = _cam_pos
+            _client.camera.look_at = _look_at
 
         if self._scoreboard is not None:
             import viser
@@ -402,7 +548,12 @@ class PassiveViserViewer(ViserPlayViewer):
         self._scoreboard_html.content = self._scoreboard.to_html()
 
     def tick(self) -> bool:
+        now = time.perf_counter()
+        if self._next_render_at and now < self._next_render_at:
+            time.sleep(min(self._next_render_at - now, self._render_interval_s))
+            return False
         rendered = super().tick()
+        self._next_render_at = time.perf_counter() + self._render_interval_s
         self._update_scoreboard_display()
         return rendered
 
@@ -511,6 +662,7 @@ def run_trial(
     step_dt: float,
     realtime: bool,
     scoreboard: ScoreboardState | None = None,
+    video_recorder: _TimedVideoRecorder | None = None,
 ) -> dict[str, Any]:
     if scoreboard is not None:
         scoreboard.set_phase("running", trial_index)
@@ -522,17 +674,17 @@ def run_trial(
     prev_action_s = torch.zeros(1, 29, device=device)
     prev_action_g = torch.zeros(1, 29, device=device)
     ball = env.unwrapped.scene["ball"]
+    raw_state_cache: dict[str, Any] = {"shooter": {}, "goalkeeper": {}, "ball": {}}
     goal_scored = False
     error: str | None = None
     steps = 0
     start_time = time.perf_counter()
-
+    trial_start = start_time
     for _ in range(max_steps):
         try:
             with torch.inference_mode():
-                raw = _build_raw_state(env_base, prev_action_s, prev_action_g)
-                s_act = shooter_policy(raw)
-                g_act = goalkeeper_policy(raw)
+                raw = _build_raw_state(env_base, prev_action_s, prev_action_g, raw_state_cache)
+                s_act, g_act = _call_policies_parallel(shooter_policy, goalkeeper_policy, raw)
         except Exception as exc:
             error = str(exc)
             break
@@ -558,6 +710,7 @@ def run_trial(
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
+    elapsed_total = time.perf_counter() - trial_start
     winner = "shooter" if goal_scored else "goalkeeper"
     if error is not None:
         winner = "error"
@@ -569,6 +722,7 @@ def run_trial(
         "winner": winner,
         "goal_scored": goal_scored,
         "steps": steps,
+        "elapsed_s": elapsed_total,
         "ball_final_pos": ball_pos.tolist(),
         "error": error,
     }
@@ -584,12 +738,18 @@ def run_match(
     max_steps: int,
     step_dt: float,
     scoreboard: ScoreboardState | None = None,
+    video_recorder: _TimedVideoRecorder | None = None,
 ) -> dict[str, Any]:
     print(f"[INFO] Running {cfg.num_trials} trials, max_steps={max_steps}", flush=True)
     trials: list[dict[str, Any]] = []
     goals = 0
     errors = 0
     for index in range(1, cfg.num_trials + 1):
+        if hasattr(env_base, "episode_count"):
+            try:
+                env_base.episode_count = index - 1
+            except Exception:
+                pass
         stats = run_trial(
             index,
             env,
@@ -609,11 +769,14 @@ def run_match(
             errors += 1
         print(
             f"[TRIAL {index}/{cfg.num_trials}] winner={stats['winner']} "
-            f"goal={stats['goal_scored']} steps={stats['steps']}",
+            f"goal={stats['goal_scored']} steps={stats['steps']} "
+            f"elapsed={stats.get('elapsed_s', 0.0):.2f}s",
             flush=True,
         )
         if stats["error"]:
             print(f"[ERROR] {stats['error']}", flush=True)
+        if video_recorder is not None:
+            video_recorder.finish_trial()
 
     goalkeeper_wins = cfg.num_trials - goals - errors
     summary = {
@@ -664,6 +827,7 @@ class CompeteConfig:
     viser_host: str = "0.0.0.0"
     viser_port: int = 7000
     no_viewer: bool = False
+    save_video: bool = True
     request_timeout: float = 2.0
     realtime: bool = True
     device: str | None = None
@@ -687,11 +851,16 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
     timestamp = _utc_timestamp()
 
     # Determine match identity and output paths.
-    match_name = cfg.match_id or (
-        f"{_sanitize(cfg.shooter_team)}_shooter_vs_"
-        f"{_sanitize(cfg.goalkeeper_team)}_goalkeeper"
-    )
-    match_id = f"{timestamp}_{_sanitize(match_name)}"
+    # When launched by the tournament server cfg.match_id is already a unique
+    # timestamped name — use it as-is.  For ad‑hoc runs generate one.
+    if cfg.match_id:
+        match_id = cfg.match_id
+    else:
+        match_id = (
+            f"{timestamp}_"
+            f"{_sanitize(cfg.shooter_team)}_shooter_vs_"
+            f"{_sanitize(cfg.goalkeeper_team)}_goalkeeper"
+        )
     match_dir = DEFAULT_RESULTS_DIR / match_id
     match_dir.mkdir(parents=True, exist_ok=True)
     result_path = Path(cfg.results_json) if cfg.results_json else (match_dir / "result.json")
@@ -701,26 +870,24 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
     print(f"[INFO] Viser: http://{cfg.viser_host}:{cfg.viser_port}", flush=True)
 
     env_cfg = make_compete_env_cfg(config)
-    # Ensure ViewerConfig resolution matches the env_cfg (already set in make_compete_env_cfg)
-    # EGL contexts are thread-local, so we create the renderer in the main thread
-    # but immediately close it.  It will be re-initialised inside the worker thread.
-    env_base_raw = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode="rgb_array")
-    env_base_raw._offline_renderer.close()
-    env_base_raw._offline_renderer = None
+    # Only enable offscreen rendering when we actually save video. This keeps
+    # the no-video path aligned with the old fast implementation.
+    render_mode = "rgb_array" if cfg.save_video else None
+    env_base_raw = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
+    if cfg.save_video:
+        env_base_raw._offline_renderer.close()
+        env_base_raw._offline_renderer = None
     act_dim_shooter = env_base_raw.action_manager.get_term("shooter_joint_pos").action_dim
     act_dim_goalkeeper = env_base_raw.action_manager.get_term("goalkeeper_joint_pos").action_dim
 
-    # Set up video recording — everything lives under the match directory.
+    # Set up video recording only when requested.
     video_folder = match_dir / "videos"
-    video_folder.mkdir(parents=True, exist_ok=True)
-    env_base = VideoRecorder(
-        env_base_raw,
-        video_folder=video_folder,
-        episode_trigger=lambda ep: True,
-        video_length=max_steps,
-        disable_logger=True,
-    )
-    print(f"[INFO] Video recording: {video_folder}", flush=True)
+    env_base = env_base_raw
+    if cfg.save_video:
+        video_folder.mkdir(parents=True, exist_ok=True)
+        print(f"[INFO] Video recording: {video_folder}", flush=True)
+    else:
+        print("[INFO] Video recording disabled.", flush=True)
 
     # Disable real-time pacing in no-viewer mode for max throughput
     if cfg.no_viewer:
@@ -739,8 +906,20 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
             if cfg.goalkeeper_api
             else ZeroPolicy(act_dim_goalkeeper, device)
         )
-        env = RslRlVecEnvWrapper(env_base, clip_actions=100.0)
         result_holder: dict[str, Any] = {}
+        video_recorder: _TimedVideoRecorder | None = None
+        if cfg.save_video:
+            video_recorder = _TimedVideoRecorder(
+                env_base_raw,
+                video_folder=video_folder,
+                episode_trigger=lambda ep: True,
+                video_length=None,
+                disable_logger=True,
+                step_dt=step_dt,
+                capture_fps=24.0,
+            )
+            env_base = video_recorder
+        env = RslRlVecEnvWrapper(env_base, clip_actions=100.0)
         done_event = threading.Event()
         start_event = threading.Event()
         scoreboard = ScoreboardState(
@@ -755,12 +934,13 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
             # render() during env.step().
             from mjlab.viewer import OffscreenRenderer
 
-            env_base_raw._offline_renderer = OffscreenRenderer(
-                model=env_base_raw.sim.mj_model,
-                cfg=env_base_raw.cfg.viewer,
-                scene=env_base_raw.scene,
-            )
-            env_base_raw._offline_renderer.initialize()
+            if cfg.save_video:
+                env_base_raw._offline_renderer = OffscreenRenderer(
+                    model=env_base_raw.sim.mj_model,
+                    cfg=env_base_raw.cfg.viewer,
+                    scene=env_base_raw.scene,
+                )
+                env_base_raw._offline_renderer.initialize()
             try:
                 wait_for_start(
                     start_event,
@@ -778,6 +958,7 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
                         max_steps,
                         step_dt,
                         scoreboard,
+                        video_recorder,
                     )
                 )
             except Exception as exc:
@@ -794,7 +975,7 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
             finally:
                 # Clean up the worker-thread EGL renderer.
                 try:
-                    if env_base_raw._offline_renderer is not None:
+                    if cfg.save_video and env_base_raw._offline_renderer is not None:
                         env_base_raw._offline_renderer.close()
                         env_base_raw._offline_renderer = None
                 except Exception:
@@ -823,7 +1004,7 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
                 try:
                     while viewer.is_running() and not done_event.is_set():
                         if not viewer.tick():
-                            time.sleep(0.001)
+                            continue
                         viewer._update_stats()
                 finally:
                     viewer.close()
@@ -835,11 +1016,15 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
             done_event.wait()
 
         worker.join(timeout=5.0)
-        # Collect recorded video paths (relative to results dir for direct URL use)
-        video_paths = sorted(
-            f"{match_id}/videos/{p.name}"
-            for p in video_folder.glob("*.mp4")
-        )
+        if cfg.save_video and video_recorder is not None:
+            video_recorder.wait_for_writes()
+        # Collect recorded video paths only when video saving is enabled.
+        video_paths = []
+        if cfg.save_video:
+            video_paths = sorted(
+                f"{match_id}/videos/{p.name}"
+                for p in video_folder.glob("*.mp4")
+            )
         payload = {
             "timestamp": timestamp,
             "match_id": match_id,
@@ -860,10 +1045,12 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
     except Exception as exc:
         # Try to collect any videos that were recorded before the crash
         try:
-            video_paths_err = sorted(
-                f"{match_id}/videos/{p.name}"
-                for p in video_folder.glob("*.mp4")
-            )
+            video_paths_err = []
+            if cfg.save_video:
+                video_paths_err = sorted(
+                    f"{match_id}/videos/{p.name}"
+                    for p in video_folder.glob("*.mp4")
+                )
         except Exception:
             video_paths_err = []
         payload = {
