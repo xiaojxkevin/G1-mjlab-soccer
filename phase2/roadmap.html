@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🏆 CS2810世界杯抽签与晋级模拟器</title>
+    <!-- 引入 Tailwind CSS 构建极简高级暗黑 UI -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 隐藏滚动条但保留滚动功能 */
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+        /* 冠军金光闪烁动画 */
+        @keyframes goldPulse {
+            0%, 100% { box-shadow: 0 0 15px rgba(251, 191, 36, 0.4); border-color: rgba(251, 191, 36, 0.7); }
+            50% { box-shadow: 0 0 35px rgba(251, 191, 36, 0.9); border-color: rgba(251, 191, 36, 1); }
+        }
+        .champion-glow {
+            animation: goldPulse 2s infinite ease-in-out;
+        }
+        /* 页面背景发光微粒 */
+        .bg-glow {
+            background: radial-gradient(circle at 50% 50%, rgba(30, 41, 59, 0.4) 0%, rgba(15, 23, 42, 1) 100%);
+        }
+        /* 抽签球体旋转动画 */
+        @keyframes bowlSpin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .bowl-spin {
+            animation: bowlSpin 1.5s linear infinite;
+        }
+    </style>
+</head>
+<body class="bg-glow text-slate-100 min-h-screen flex flex-col font-sans select-none overflow-x-hidden">
+
+    <!-- 顶栏导航与操作面板 -->
+    <header class="bg-slate-950/80 backdrop-blur-md border-b border-slate-800/80 px-6 py-4 sticky top-0 z-40">
+        <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
+            <!-- 左侧标题与品牌 -->
+            <div class="flex items-center gap-3">
+                <span class="text-3xl">🏆</span>
+                <div>
+                    <h1 class="text-xl font-black tracking-wider bg-gradient-to-r from-amber-400 via-emerald-400 to-blue-500 bg-clip-text text-transparent">
+                        CS2810世界杯
+                    </h1>
+                    <p class="text-xs text-slate-400">淘汰赛分档抽签小组赛与晋级模拟器</p>
+                </div>
+            </div>
+
+            <!-- 中间视图切换 Tab -->
+            <div class="flex bg-slate-900/80 p-1 rounded-xl border border-slate-800/80">
+                <button id="tab-draw" onclick="switchView('draw')" class="px-4 py-2 rounded-lg text-xs font-bold transition duration-200 bg-blue-600 text-white shadow-md">
+                    🔮 抽签仪式 (Draw Ceremony)
+                </button>
+                <button id="tab-bracket" onclick="switchView('bracket')" class="px-4 py-2 rounded-lg text-xs font-bold transition duration-200 text-slate-400 hover:text-white">
+                    📊 晋级对阵图 (Bracket)
+                </button>
+            </div>
+            
+            <!-- 右侧控制区（撤销操作） -->
+            <div class="flex items-center gap-2">
+                <button id="undo-btn" onclick="undoAction()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 border border-slate-700 rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-lg" disabled>
+                    ↩️ 撤销上一步 (Undo)
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- 核心主展示区 -->
+    <main class="flex-1 flex flex-col justify-center items-center p-4 md:p-8">
+        
+        <!-- 页面 1: 抽签仪式页面 -->
+        <section id="view-draw" class="w-full max-w-7xl flex flex-col gap-6">
+            <!-- 头部说明 -->
+            <div class="bg-slate-900/40 border border-slate-800/80 rounded-2xl p-6 flex flex-col lg:flex-row gap-6 justify-between items-center">
+                <div class="space-y-2 text-center lg:text-left">
+                    <h2 class="text-lg font-black text-amber-400">Phase 2 晋级抽签规则说明</h2>
+                    <p class="text-xs text-slate-400 max-w-xl leading-relaxed">
+                        系统已根据两两测试的总得分进行科学分档。由于共有 14 支队伍，系统自动加入 2 个<strong>轮空名额 (BYE)</strong>。<strong class="text-amber-400">Team9 与 T4 作为积分前两名，分居上下半区并锁定轮空保送资格</strong>，其余选手按档位及避让原则由 Seed 确定性洗牌。
+                    </p>
+                </div>
+                
+                <!-- 抽签与 Seed 控制区 -->
+                <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 w-full lg:w-auto">
+                    <!-- Seed 输入控制块 -->
+                    <div class="flex flex-col gap-1.5 bg-slate-950/50 p-3 rounded-xl border border-slate-800/60">
+                        <label class="text-[10px] font-bold text-slate-400 tracking-wider">抽签 Seed (大写字母+数字):</label>
+                        <div class="flex gap-2">
+                            <input type="text" id="seed-input" class="bg-slate-950 border border-slate-800 text-slate-200 text-xs rounded-lg px-3 py-2 w-36 focus:outline-none focus:border-indigo-500 font-mono" placeholder="输入 Seed">
+                            <button onclick="rollNewSeed()" class="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold transition flex items-center gap-1">
+                                🎲 随机
+                            </button>
+                        </div>
+                    </div>
+                    <!-- 抽签触发按钮 -->
+                    <button onclick="startDrawCeremony()" class="px-6 py-4 bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600 hover:from-blue-500 hover:to-violet-500 text-white font-black rounded-xl text-xs tracking-widest shadow-xl shadow-indigo-950/40 hover:shadow-indigo-900/60 transition-all duration-300 transform active:scale-95 flex items-center justify-center gap-2 h-[68px] sm:self-end">
+                        <span class="text-base">🔮</span>
+                        开始种子抽签
+                    </button>
+                </div>
+            </div>
+
+            <!-- 分档卡片展示网格 -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <!-- Tier 1 -->
+                <div class="bg-slate-900/30 border border-amber-500/20 rounded-2xl p-4 flex flex-col gap-3">
+                    <div class="flex justify-between items-center border-b border-amber-500/20 pb-2">
+                        <span class="text-xs font-black text-amber-400 tracking-wider">🌟 TIER 1 (得分 ≥ 20)</span>
+                        <span class="px-2 py-0.5 bg-amber-500/10 text-amber-400 rounded-full text-[10px] font-bold">5 支队伍</span>
+                    </div>
+                    <div class="space-y-2 text-xs" id="tier-1-list">
+                        <!-- 由JS渲染 -->
+                    </div>
+                </div>
+
+                <!-- Tier 2 -->
+                <div class="bg-slate-900/30 border border-emerald-500/20 rounded-2xl p-4 flex flex-col gap-3">
+                    <div class="flex justify-between items-center border-b border-emerald-500/20 pb-2">
+                        <span class="text-xs font-black text-emerald-400 tracking-wider">🟢 TIER 2 (得分 15–19)</span>
+                        <span class="px-2 py-0.5 bg-emerald-500/10 text-emerald-400 rounded-full text-[10px] font-bold">4 支队伍</span>
+                    </div>
+                    <div class="space-y-2 text-xs" id="tier-2-list">
+                        <!-- 由JS渲染 -->
+                    </div>
+                </div>
+
+                <!-- Tier 3 -->
+                <div class="bg-slate-900/30 border border-blue-500/20 rounded-2xl p-4 flex flex-col gap-3">
+                    <div class="flex justify-between items-center border-b border-blue-500/20 pb-2">
+                        <span class="text-xs font-black text-blue-400 tracking-wider">🔵 TIER 3 (得分 10–14)</span>
+                        <span class="px-2 py-0.5 bg-blue-500/10 text-blue-400 rounded-full text-[10px] font-bold">3 支队伍</span>
+                    </div>
+                    <div class="space-y-2 text-xs" id="tier-3-list">
+                        <!-- 由JS渲染 -->
+                    </div>
+                </div>
+
+                <!-- Tier 4 -->
+                <div class="bg-slate-900/30 border border-rose-500/20 rounded-2xl p-4 flex flex-col gap-3">
+                    <div class="flex justify-between items-center border-b border-rose-500/20 pb-2">
+                        <span class="text-xs font-black text-rose-400 tracking-wider">🔴 TIER 4 (得分 &lt; 10)</span>
+                        <span class="px-2 py-0.5 bg-rose-500/10 text-rose-400 rounded-full text-[10px] font-bold">2 支队伍</span>
+                    </div>
+                    <div class="space-y-2 text-xs" id="tier-4-list">
+                        <!-- 由JS渲染 -->
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 页面 2: 淘汰赛对阵图页面 -->
+        <section id="view-bracket" class="w-full hidden flex-col justify-center items-center">
+            <!-- 提示信息 -->
+            <div class="w-full max-w-7xl mb-4 bg-slate-900/60 border border-slate-800/60 rounded-xl px-4 py-3 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-3 text-xs md:text-sm text-slate-300 shadow-inner animate-fade-in">
+                <div class="flex items-center gap-2">
+                    <span class="animate-bounce">💡</span>
+                    <span>操作指南：<strong>鼠标单击</strong>高亮队伍卡片决定其晋级；<strong>双击</strong>最外侧首轮队伍卡片可<strong>自定义修改队名</strong>。</span>
+                </div>
+                <!-- 带有 Seed 复制控制面板的辅助区 -->
+                <div class="flex flex-wrap items-center gap-3">
+                    <div class="bg-slate-950/80 border border-slate-800 rounded-xl px-3 py-1.5 text-[11px] font-mono text-slate-400 flex items-center gap-2">
+                        <span>对局 Seed:</span>
+                        <span id="active-seed-display" class="font-black text-indigo-400">--------</span>
+                        <button onclick="copyActiveSeed()" class="hover:text-white transition bg-slate-800 hover:bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded text-[10px] font-sans font-semibold">📋 复制</button>
+                    </div>
+                    <div class="text-[10px] bg-slate-800 text-slate-400 px-2 py-1.5 rounded-lg border border-slate-700">
+                        注：带 (BYE) 的比赛队伍已由于轮空规则自动保送8强
+                    </div>
+                </div>
+            </div>
+
+            <!-- 对阵图容器（支持横向滚动适配移动端） -->
+            <div class="w-full overflow-x-auto no-scrollbar py-6 rounded-2xl bg-slate-900/10 border border-slate-900/30">
+                <div id="bracket-container" class="relative min-w-[1240px] max-w-[1400px] mx-auto grid grid-cols-9 gap-1 h-[680px] px-4">
+                    
+                    <!-- 动态连线画布 -->
+                    <svg id="bracket-lines" class="absolute inset-0 pointer-events-none w-full h-full z-0"></svg>
+
+                    <!-- 左半区 Column 1: 16强 (首轮) -->
+                    <div class="flex flex-col justify-around h-full z-10">
+                        <!-- Match 1 -->
+                        <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                            <div id="L_R16_1" data-node-id="L_R16_1" class="team-card">Team 1</div>
+                            <div id="L_R16_2" data-node-id="L_R16_2" class="team-card">Team 2</div>
+                        </div>
+                        <!-- Match 2 -->
+                        <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                            <div id="L_R16_3" data-node-id="L_R16_3" class="team-card">Team 3</div>
+                            <div id="L_R16_4" data-node-id="L_R16_4" class="team-card">Team 4</div>
+                        </div>
+                        <!-- Match 3 -->
+                        <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                            <div id="L_R16_5" data-node-id="L_R16_5" class="team-card">Team 5</div>
+                            <div id="L_R16_6" data-node-id="L_R16_6" class="team-card">Team 6</div>
+                        </div>
+                        <!-- Match 4 -->
+                        <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                            <div id="L_R16_7" data-node-id="L_R16_7" class="team-card">Team 7</div>
+                            <div id="L_R16_8" data-node-id="L_R16_8" class="team-card">Team 8</div>
+                        </div>
+                    </div>
+
+                    <!-- 左半区 Column 2: 1/4 决赛 -->
+                    <div class="flex flex-col justify-around h-full z-10">
+                        <div class="flex flex-col gap-20">
+                            <!-- QF 左 Match 1 -->
+                            <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                                <div id="L_QF_1" data-node-id="L_QF_1" class="team-card"></div>
+                                <div id="L_QF_2" data-node-id="L_QF_2" class="team-card"></div>
+                            </div>
+                            <!-- QF 左 Match 2 -->
+                            <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                                <div id="L_QF_3" data-node-id="L_QF_3" class="team-card"></div>
+                                <div id="L_QF_4" data-node-id="L_QF_4" class="team-card"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 左半区 Column 3: 半决赛 -->
+                    <div class="flex flex-col justify-around h-full z-10">
+                        <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                            <div id="L_SF_1" data-node-id="L_SF_1" class="team-card"></div>
+                            <div id="L_SF_2" data-node-id="L_SF_2" class="team-card"></div>
+                        </div>
+                    </div>
+
+                    <!-- 左半区 Column 4: 决赛席位 -->
+                    <div class="flex flex-col justify-around h-full z-10">
+                        <div id="L_F" data-node-id="L_F" class="team-card"></div>
+                    </div>
+
+                    <!-- Column 5: 中央总冠军神坛 -->
+                    <div class="flex flex-col justify-center items-center gap-6 z-10 px-4">
+                        <div class="text-center">
+                            <span class="text-4xl block animate-bounce mb-1">🏆</span>
+                            <h2 class="text-xs font-black tracking-widest text-amber-500 uppercase"> WORLD CHAMPION </h2>
+                        </div>
+                        <!-- 终极总冠军展示 -->
+                        <div id="CHAMPION" data-node-id="CHAMPION" class="w-36 h-20 rounded-2xl flex flex-col justify-center items-center border border-slate-800 bg-slate-950 transition-all duration-300 text-center px-2">
+                            <!-- JS渲染 -->
+                        </div>
+                    </div>
+
+                    <!-- 右半区 Column 6: 决赛席位 -->
+                    <div class="flex flex-col justify-around h-full z-10">
+                        <div id="R_F" data-node-id="R_F" class="team-card"></div>
+                    </div>
+
+                    <!-- 右半区 Column 7: 半决赛 -->
+                    <div class="flex flex-col justify-around h-full z-10">
+                        <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                            <div id="R_SF_1" data-node-id="R_SF_1" class="team-card"></div>
+                            <div id="R_SF_2" data-node-id="R_SF_2" class="team-card"></div>
+                        </div>
+                    </div>
+
+                    <!-- 右半区 Column 8: 1/4 决赛 -->
+                    <div class="flex flex-col justify-around h-full z-10">
+                        <div class="flex flex-col gap-20">
+                            <!-- QF 右 Match 1 -->
+                            <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                                <div id="R_QF_1" data-node-id="R_QF_1" class="team-card"></div>
+                                <div id="R_QF_2" data-node-id="R_QF_2" class="team-card"></div>
+                            </div>
+                            <!-- QF 右 Match 2 -->
+                            <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                                <div id="R_QF_3" data-node-id="R_QF_3" class="team-card"></div>
+                                <div id="R_QF_4" data-node-id="R_QF_4" class="team-card"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 右半区 Column 9: 16强 (首轮) -->
+                    <div class="flex flex-col justify-around h-full z-10">
+                        <!-- Match 5 -->
+                        <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                            <div id="R_R16_1" data-node-id="R_R16_1" class="team-card">Team 9</div>
+                            <div id="R_R16_2" data-node-id="R_R16_2" class="team-card">Team 10</div>
+                        </div>
+                        <!-- Match 6 -->
+                        <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                            <div id="R_R16_3" data-node-id="R_R16_3" class="team-card">Team 11</div>
+                            <div id="R_R16_4" data-node-id="R_R16_4" class="team-card">Team 12</div>
+                        </div>
+                        <!-- Match 7 -->
+                        <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                            <div id="R_R16_5" data-node-id="R_R16_5" class="team-card">Team 13</div>
+                            <div id="R_R16_6" data-node-id="R_R16_6" class="team-card">Team 14</div>
+                        </div>
+                        <!-- Match 8 -->
+                        <div class="flex flex-col gap-2 bg-slate-900/30 p-1.5 rounded-xl border border-slate-800/20">
+                            <div id="R_R16_7" data-node-id="R_R16_7" class="team-card">Team 15</div>
+                            <div id="R_R16_8" data-node-id="R_R16_8" class="team-card">Team 16</div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- 底部状态和通知栏 -->
+    <footer class="bg-slate-950/80 border-t border-slate-900 px-6 py-3 flex justify-between items-center text-xs text-slate-500 z-10">
+        <div>CS2810小世界杯 淘汰赛模拟器 © 2026</div>
+        <div id="notification" class="text-emerald-400 font-bold transition-all duration-300"></div>
+    </footer>
+
+    <!-- 自定义高颜值改名模态弹窗 -->
+    <div id="rename-modal" class="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center opacity-0 pointer-events-none transition-opacity duration-300">
+        <div class="bg-slate-900 border border-slate-800/80 p-6 rounded-2xl shadow-2xl max-w-sm w-full mx-4 transform scale-95 transition-transform duration-300" id="modal-card">
+            <h3 class="text-base font-black mb-3 flex items-center gap-2"><span class="text-blue-500">✏️</span> 自定义队伍名称</h3>
+            <p class="text-xs text-slate-400 mb-4">请输入新的队伍名称。下游所有受依赖的晋级路线均会自动同步重置。</p>
+            <input type="text" id="rename-input" maxlength="15" class="w-full bg-slate-950 border border-slate-800 text-white rounded-xl px-4 py-2.5 mb-5 focus:outline-none focus:border-blue-500 text-sm transition" placeholder="例如：Team Alpha">
+            <div class="flex justify-end gap-3 text-xs font-bold">
+                <button onclick="closeRenameModal()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition">取消</button>
+                <button onclick="saveNewTeamName()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition shadow-lg shadow-blue-900/30">确认修改</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 抽签进行中的加载遮罩动画 -->
+    <div id="draw-loader" class="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-50 flex flex-col items-center justify-center gap-4 opacity-0 pointer-events-none transition-opacity duration-300">
+        <div class="relative w-24 h-24 flex items-center justify-center">
+            <!-- 外旋环 -->
+            <div class="absolute inset-0 border-4 border-dashed border-indigo-500 rounded-full bowl-spin"></div>
+            <!-- 内实环 -->
+            <div class="w-16 h-16 bg-gradient-to-tr from-indigo-600 to-purple-600 rounded-full flex items-center justify-center shadow-lg shadow-indigo-500/50">
+                <span class="text-2xl animate-pulse">🔮</span>
+            </div>
+        </div>
+        <p class="text-sm font-black text-slate-200 tracking-wider" id="loader-text">种子池配对中...</p>
+        <p class="text-xs text-slate-500">正在按照避让机制为您自动组建 16 强淘汰对局</p>
+    </div>
+
+    <!-- 样式模块：定义动态对阵卡片的标准样式 -->
+    <style>
+        .team-card {
+            @apply w-28 h-10 md:w-32 md:h-10 rounded-lg flex items-center justify-center text-[11px] md:text-xs font-semibold cursor-pointer transition-all duration-200 select-none px-1 text-center overflow-hidden text-ellipsis whitespace-nowrap;
+            background-color: #1e293b;
+            border: 1.5px solid #334155;
+            color: #94a3b8;
+        }
+        .team-card:hover {
+            @apply transform scale-105 shadow-md shadow-blue-950/40;
+            border-color: #3b82f6;
+            color: #ffffff;
+        }
+        /* 晋级高亮绿色卡片 */
+        .card-winner {
+            @apply font-bold shadow-lg shadow-emerald-950/20;
+            background-color: #1e293b;
+            border-color: #10b981;
+            color: #10b981;
+        }
+        /* 被淘汰/未激活的灰色状态 */
+        .card-eliminated {
+            @apply opacity-40;
+            background-color: #0f172a;
+            border-color: #1e293b;
+            color: #475569;
+        }
+        /* 未决出的“待定”灰色框 */
+        .card-tbd {
+            @apply border-dashed italic text-slate-600 font-normal;
+            background-color: rgba(15, 23, 42, 0.4);
+            border-color: #1e293b;
+        }
+        /* 特殊轮空(BYE)卡片样式 */
+        .card-bye {
+            @apply opacity-30 border-dashed text-slate-500 cursor-not-allowed pointer-events-none;
+            background-color: transparent;
+            border-color: #1e293b;
+        }
+    </style>
+
+    <!-- 核心逻辑控制 JavaScript -->
+    <script>
+        // 定义您上传的文件中所列出的14支队伍真实数据
+        const initialTiers = {
+            tier1: [
+                { id: 'T9', name: 'Team9', score: 26 },
+                { id: 'T4', name: 'T4', score: 23 },
+                { id: 'T1', name: '我爱吃海参', score: 22 },
+                { id: 'T11', name: 'G你太美', score: 22 },
+                { id: 'T12', name: 'Team12', score: 22 }
+            ],
+            tier2: [
+                { id: 'T5', name: 'TEAM5', score: 19 },
+                { id: 'T3', name: 'Team3', score: 18 },
+                { id: 'T7', name: 'Team7', score: 17 },
+                { id: 'T8', name: 'Kedox', score: 15 }
+            ],
+            tier3: [
+                { id: 'T2', name: 'TeamWHY', score: 14 },
+                { id: 'T10', name: 'Team10', score: 13 },
+                { id: 'T13', name: '守不住的队发大财', score: 13 }
+            ],
+            tier4: [
+                { id: 'T6', name: 'Team6', score: 7 },
+                { id: 'T14', name: 'Team14', score: 7 }
+            ]
+        };
+
+        // 对阵图卡片的状态对象
+        let nodes = {
+            // ===== 左半区 =====
+            'L_R16_1': { team: 'Team 1', winner: false, parent: 'L_QF_1' },
+            'L_R16_2': { team: 'Team 2', winner: false, parent: 'L_QF_1' },
+            'L_R16_3': { team: 'Team 3', winner: false, parent: 'L_QF_2' },
+            'L_R16_4': { team: 'Team 4', winner: false, parent: 'L_QF_2' },
+            'L_R16_5': { team: 'Team 5', winner: false, parent: 'L_QF_3' },
+            'L_R16_6': { team: 'Team 6', winner: false, parent: 'L_QF_3' },
+            'L_R16_7': { team: 'Team 7', winner: false, parent: 'L_QF_4' },
+            'L_R16_8': { team: 'Team 8', winner: false, parent: 'L_QF_4' },
+
+            'L_QF_1': { team: null, winner: false, parent: 'L_SF_1' },
+            'L_QF_2': { team: null, winner: false, parent: 'L_SF_1' },
+            'L_QF_3': { team: null, winner: false, parent: 'L_SF_2' },
+            'L_QF_4': { team: null, winner: false, parent: 'L_SF_2' },
+
+            'L_SF_1': { team: null, winner: false, parent: 'L_F' },
+            'L_SF_2': { team: null, winner: false, parent: 'L_F' },
+
+            'L_F': { team: null, winner: false, parent: 'CHAMPION' },
+
+            // ===== 右半区 =====
+            'R_R16_1': { team: 'Team 9', winner: false, parent: 'R_QF_1' },
+            'R_R16_2': { team: 'Team 10', winner: false, parent: 'R_QF_1' },
+            'R_R16_3': { team: 'Team 11', winner: false, parent: 'R_QF_2' },
+            'R_R16_4': { team: 'Team 12', winner: false, parent: 'R_QF_2' },
+            'R_R16_5': { team: 'Team 13', winner: false, parent: 'R_QF_3' },
+            'R_R16_6': { team: 'Team 14', winner: false, parent: 'R_QF_3' },
+            'R_R16_7': { team: 'Team 15', winner: false, parent: 'R_QF_4' },
+            'R_R16_8': { team: 'Team 16', winner: false, parent: 'R_QF_4' },
+
+            'R_QF_1': { team: null, winner: false, parent: 'R_SF_1' },
+            'R_QF_2': { team: null, winner: false, parent: 'R_SF_1' },
+            'R_QF_3': { team: null, winner: false, parent: 'R_SF_2' },
+            'R_QF_4': { team: null, winner: false, parent: 'R_SF_2' },
+
+            'R_SF_1': { team: null, winner: false, parent: 'R_F' },
+            'R_SF_2': { team: null, winner: false, parent: 'R_F' },
+
+            'R_F': { team: null, winner: false, parent: 'CHAMPION' },
+
+            // ===== 冠军席位 =====
+            'CHAMPION': { team: null, winner: false, parent: null }
+        };
+
+        // 对阵连线配置表
+        const matchups = [
+            // 左半区连线
+            { c1: 'L_R16_1', c2: 'L_R16_2', p: 'L_QF_1', side: 'left' },
+            { c1: 'L_R16_3', c2: 'L_R16_4', p: 'L_QF_2', side: 'left' },
+            { c1: 'L_R16_5', c2: 'L_R16_6', p: 'L_QF_3', side: 'left' },
+            { c1: 'L_R16_7', c2: 'L_R16_8', p: 'L_QF_4', side: 'left' },
+            { c1: 'L_QF_1',  c2: 'L_QF_2',  p: 'L_SF_1', side: 'left' },
+            { c1: 'L_QF_3',  c2: 'L_QF_4',  p: 'L_SF_2', side: 'left' },
+            { c1: 'L_SF_1',  c2: 'L_SF_2',  p: 'L_F',    side: 'left' },
+            // 右半区连线
+            { c1: 'R_R16_1', c2: 'R_R16_2', p: 'R_QF_1', side: 'right' },
+            { c1: 'R_R16_3', c2: 'R_R16_4', p: 'R_QF_2', side: 'right' },
+            { c1: 'R_R16_5', c2: 'R_R16_6', p: 'R_QF_3', side: 'right' },
+            { c1: 'R_R16_7', c2: 'R_R16_8', p: 'R_QF_4', side: 'right' },
+            { c1: 'R_QF_1',  c2: 'R_QF_2',  p: 'R_SF_1', side: 'right' },
+            { c1: 'R_QF_3',  c2: 'R_QF_4',  p: 'R_SF_2', side: 'right' },
+            { c1: 'R_SF_1',  c2: 'R_SF_2',  p: 'R_F',    side: 'right' }
+        ];
+
+        // Seed 状态管理与可复现伪随机数生成器 (Mulberry32)
+        let currentSeed = "";
+        let prng = Math.random;
+
+        // Cyrb128 哈希算法：用于将任何字符串转化为 32 位整型种子
+        function cyrb128(str) {
+            let h1 = 1779033703, h2 = 302473474, h3 = 336245363, h4 = 50253601;
+            for (let i = 0, k; i < str.length; i++) {
+                k = str.charCodeAt(i);
+                h1 = h2 ^ Math.imul(h1 ^ k, 597399067);
+                h2 = h3 ^ Math.imul(h2 ^ k, 2869860233);
+                h3 = h4 ^ Math.imul(h3 ^ k, 951274213);
+                h4 = h1 ^ Math.imul(h4 ^ k, 2716044179);
+            }
+            h1 = Math.imul(h3 ^ (h1 >>> 18), 597399067);
+            h2 = Math.imul(h4 ^ (h2 >>> 22), 2869860233);
+            h3 = Math.imul(h1 ^ (h3 >>> 17), 951274213);
+            h4 = Math.imul(h2 ^ (h4 >>> 19), 2716044179);
+            return [(h1^h2^h3^h4)>>>0, (h2^h1)>>>0, (h3^h1)>>>0, (h4^h1)>>>0];
+        }
+
+        // Mulberry32 生成器：基于整型种子返回 0~1 的确定性随机数
+        function mulberry32(a) {
+            return function() {
+              let t = a += 0x6D2B79F5;
+              t = Math.imul(t ^ (t >>> 15), t | 1);
+              t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+              return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+            }
+        }
+
+        // 设置当前的活动 Seed 并初始化 PRNG
+        function setSeed(seedStr) {
+            currentSeed = seedStr;
+            const seedData = cyrb128(seedStr);
+            prng = mulberry32(seedData[0]);
+        }
+
+        // 随机产生一个 8 位高可读的字母和数字种子
+        function generateRandomSeed() {
+            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+            let result = '';
+            for (let i = 0; i < 8; i++) {
+                result += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            return result;
+        }
+
+        // 随机掷出一个新 Seed 码
+        function rollNewSeed() {
+            const newSeed = generateRandomSeed();
+            document.getElementById('seed-input').value = newSeed;
+            showNotify(`🎲 新 Seed 已就绪: ${newSeed}`);
+        }
+
+        // 更新各界面元素展示的 Seed 文本
+        function updateSeedDisplays(seed) {
+            currentSeed = seed;
+            const el = document.getElementById('active-seed-display');
+            if (el) el.innerText = seed;
+            const inputEl = document.getElementById('seed-input');
+            if (inputEl) inputEl.value = seed;
+        }
+
+        // 复制当前的 Active Seed 到系统剪切板中
+        function copyActiveSeed() {
+            if (!currentSeed) return;
+            const tempInput = document.createElement("input");
+            tempInput.value = currentSeed;
+            document.body.appendChild(tempInput);
+            tempInput.select();
+            document.execCommand('copy');
+            document.body.removeChild(tempInput);
+            showNotify(`📋 Seed [ ${currentSeed} ] 已复制成功！您可以分享给其他同学！`);
+        }
+
+        // 历史快照保存机制
+        let history = [];
+        let currentlyEditingNode = null;
+
+        // 初始化加载
+        window.addEventListener('DOMContentLoaded', () => {
+            renderTiers();
+            initEvents();
+            
+            // 自动配置初始随机种子并模拟开局
+            const initialSeed = generateRandomSeed();
+            updateSeedDisplays(initialSeed);
+            performSeededDraw(false);
+            
+            // 响应容器大小动态刷新SVG线段
+            const observer = new ResizeObserver(() => {
+                drawLines();
+            });
+            observer.observe(document.getElementById('bracket-container'));
+        });
+
+        // 视图切换控制器
+        function switchView(viewName) {
+            const tabDraw = document.getElementById('tab-draw');
+            const tabBracket = document.getElementById('tab-bracket');
+            const viewDraw = document.getElementById('view-draw');
+            const viewBracket = document.getElementById('view-bracket');
+
+            if (viewName === 'draw') {
+                tabDraw.className = "px-4 py-2 rounded-lg text-xs font-bold transition duration-200 bg-blue-600 text-white shadow-md";
+                tabBracket.className = "px-4 py-2 rounded-lg text-xs font-bold transition duration-200 text-slate-400 hover:text-white";
+                viewDraw.classList.remove('hidden');
+                viewBracket.classList.add('hidden');
+            } else {
+                tabBracket.className = "px-4 py-2 rounded-lg text-xs font-bold transition duration-200 bg-blue-600 text-white shadow-md";
+                tabDraw.className = "px-4 py-2 rounded-lg text-xs font-bold transition duration-200 text-slate-400 hover:text-white";
+                viewBracket.classList.remove('hidden');
+                viewDraw.classList.add('hidden');
+                // 切换到对阵图后刷新导轨渲染
+                setTimeout(drawLines, 50);
+            }
+        }
+
+        // 渲染抽签仪式首页中的4个高档位数据列表
+        function renderTiers() {
+            const containerMapping = {
+                'tier-1-list': { data: initialTiers.tier1, colorClass: 'border-amber-500/20 bg-amber-500/5 text-amber-300' },
+                'tier-2-list': { data: initialTiers.tier2, colorClass: 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300' },
+                'tier-3-list': { data: initialTiers.tier3, colorClass: 'border-blue-500/20 bg-blue-500/5 text-blue-300' },
+                'tier-4-list': { data: initialTiers.tier4, colorClass: 'border-rose-500/20 bg-rose-500/5 text-rose-300' }
+            };
+
+            for (const [id, config] of Object.entries(containerMapping)) {
+                const el = document.getElementById(id);
+                if (!el) continue;
+                el.innerHTML = '';
+                config.data.forEach(team => {
+                    el.innerHTML += `
+                        <div class="flex items-center justify-between p-2.5 rounded-xl border ${config.colorClass}">
+                            <span class="font-bold text-slate-200">${team.name}</span>
+                            <span class="text-[10px] bg-slate-950/40 px-2 py-0.5 rounded-md text-slate-400 font-mono">${team.score} 积分</span>
+                        </div>
+                    `;
+                });
+            }
+        }
+
+        // 注册对局事件
+        function initEvents() {
+            document.querySelectorAll('[data-node-id]').forEach(elem => {
+                const nodeId = elem.getAttribute('data-node-id');
+                
+                // 首轮卡片支持双击改名
+                if (nodeId.includes('R16')) {
+                    elem.addEventListener('dblclick', (e) => {
+                        e.preventDefault();
+                        const node = nodes[nodeId];
+                        if (node.team !== 'BYE') {
+                            openRenameModal(nodeId);
+                        }
+                    });
+                }
+
+                // 单击进行晋级抉择
+                elem.addEventListener('click', () => {
+                    handleAdvancement(nodeId);
+                });
+            });
+        }
+
+        // 展示状态通知
+        function showNotify(msg) {
+            const container = document.getElementById('notification');
+            container.innerText = msg;
+            setTimeout(() => {
+                if (container.innerText === msg) {
+                    container.innerText = '';
+                }
+            }, 3000);
+        }
+
+        // 存储节点快照便于撤回
+        function saveStateToHistory() {
+            history.push(JSON.parse(JSON.stringify(nodes)));
+            updateUndoButtonState();
+        }
+
+        // 刷新撤回按键状态
+        function updateUndoButtonState() {
+            const btn = document.getElementById('undo-btn');
+            if (history.length > 0) {
+                btn.removeAttribute('disabled');
+            } else {
+                btn.setAttribute('disabled', 'true');
+            }
+        }
+
+        // 触发撤销操作
+        function undoAction() {
+            if (history.length > 0) {
+                nodes = history.pop();
+                updateUndoButtonState();
+                showNotify("↩️ 操作已撤销。");
+                renderBracket();
+            } else {
+                showNotify("💡 没有可撤销的历史步骤。");
+            }
+        }
+
+        // 开始抽签仪式（含动画）
+        function startDrawCeremony() {
+            const loader = document.getElementById('draw-loader');
+            const loaderText = document.getElementById('loader-text');
+            
+            loader.classList.remove('opacity-0', 'pointer-events-none');
+
+            // 抽签阶段动画话术反馈
+            const phases = [
+                { text: "🔮 正在打乱种子队伍签池...", delay: 0 },
+                { text: "🌟 正在均匀分散 Tier 1 种子队伍到上下半区，确保前两名分居两侧...", delay: 600 },
+                { text: "🟢 正在计算 Tier 2 种子位与非种子位的避让...", delay: 1200 },
+                { text: "🏁 正在锁定最强种子 Team9 与 T4 分居上下半区并自动配对轮空签保送...", delay: 1800 }
+            ];
+
+            phases.forEach(phase => {
+                setTimeout(() => {
+                    loaderText.innerText = phase.text;
+                }, phase.delay);
+            });
+
+            setTimeout(() => {
+                performSeededDraw(true);
+                loader.classList.add('opacity-0', 'pointer-events-none');
+                switchView('bracket');
+                showNotify("🔮 种子抽签完成！Team9 与 T4 已分居上下半区并锁定保送 8 强资格！");
+            }, 2400);
+        }
+
+        // 经典的确定性种子避让抽签机制
+        function performSeededDraw(triggerNotify = true) {
+            if (triggerNotify) {
+                saveStateToHistory();
+            }
+
+            // 获取输入框的 Seed，若为空，则自动生成一个
+            let inputSeed = document.getElementById('seed-input').value.trim().toUpperCase();
+            if (!inputSeed) {
+                inputSeed = generateRandomSeed();
+            }
+            updateSeedDisplays(inputSeed);
+            setSeed(inputSeed); // 初始化 Seed PRNG
+
+            // 1. 重置所有对阵节点
+            for (let id in nodes) {
+                nodes[id].winner = false;
+                nodes[id].team = null;
+            }
+
+            // 2. 深拷贝队伍名单准备进行洗牌
+            const t1 = [...initialTiers.tier1];
+            const t2 = [...initialTiers.tier2];
+            const t3 = [...initialTiers.tier3];
+            const t4 = [...initialTiers.tier4];
+
+            // 种子自适应伪随机洗牌函数
+            function seededShuffle(arr) {
+                for (let i = arr.length - 1; i > 0; i--) {
+                    const j = Math.floor(prng() * (i + 1));
+                    [arr[i], arr[j]] = [arr[j], arr[i]];
+                }
+                return arr;
+            }
+
+            // A. 精准提取出最强的两只超级种子，强制分居上下半区并锁定轮空 BYE 签位
+            const t1_top = t1.filter(t => t.name === 'Team9' || t.name === 'T4');
+            const t1_others = t1.filter(t => t.name !== 'Team9' && t.name !== 'T4');
+
+            seededShuffle(t1_top);    // 随机打乱两强：t1_top[0] 去左半区，t1_top[1] 去右半区
+            seededShuffle(t1_others); // 打乱 Tier 1 剩下的 3 个种子
+            seededShuffle(t2);
+            seededShuffle(t3);
+            seededShuffle(t4);
+
+            // 3. 构建 8 个首轮对阵组合
+            const fixtures = Array.from({ length: 8 }, () => ({ slot1: null, slot2: null }));
+
+            // 锁定 Match 0 (左半区第1场) 与 Match 4 (右半区第5场) 给 Team9 和 T4 的 slot1，分居上下半区
+            fixtures[0].slot1 = t1_top[0].name;
+            fixtures[4].slot1 = t1_top[1].name;
+
+            // 锁定 Match 0 与 Match 4 的对阵客签位 slot2 为轮空签 'BYE'
+            fixtures[0].slot2 = 'BYE';
+            fixtures[4].slot2 = 'BYE';
+
+            // 其余 Tier 1 的 3 支队伍平铺到 Match 1, Match 2, Match 6 的主签位
+            fixtures[1].slot1 = t1_others[0].name;
+            fixtures[2].slot1 = t1_others[1].name;
+            fixtures[6].slot1 = t1_others[2].name;
+
+            // Tier 2 有4个队伍。其中 3 个填充剩下的主签位 Matches 3, 5, 7
+            fixtures[3].slot1 = t2[0].name;
+            fixtures[5].slot1 = t2[1].name;
+            fixtures[7].slot1 = t2[2].name;
+
+            // 最后一个 Tier 2 选手放置在 Match 2 (第3场) 的客签位
+            fixtures[2].slot2 = t2[3].name;
+
+            // 4. 将 Tier 3 (3支)、Tier 4 (2支) 组合在一起作为非种子普通匹配签池 (5支队伍)
+            const wildcards = [
+                ...t3.map(t => t.name),
+                ...t4.map(t => t.name)
+            ];
+            seededShuffle(wildcards);
+
+            // 排除已经分发完毕客签位的 Match (0, 2, 4)，剩下的客签位是 1, 3, 5, 6, 7
+            const remainingMatches = [1, 3, 5, 6, 7];
+            remainingMatches.forEach((mIdx, idx) => {
+                fixtures[mIdx].slot2 = wildcards[idx];
+            });
+
+            // 5. 映射并填充进对局树的 R16 节点中
+            const nodeMapping = [
+                ['L_R16_1', 'L_R16_2'], // Match 1
+                ['L_R16_3', 'L_R16_4'], // Match 2
+                ['L_R16_5', 'L_R16_6'], // Match 3
+                ['L_R16_7', 'L_R16_8'], // Match 4
+                ['R_R16_1', 'R_R16_2'], // Match 5
+                ['R_R16_3', 'R_R16_4'], // Match 6
+                ['R_R16_5', 'R_R16_6'], // Match 7
+                ['R_R16_7', 'R_R16_8']  // Match 8
+            ];
+
+            fixtures.forEach((fix, idx) => {
+                const [n1Id, n2Id] = nodeMapping[idx];
+                nodes[n1Id].team = fix.slot1;
+                nodes[n2Id].team = fix.slot2;
+
+                // 6. 自动化核心逻辑：如果客签是轮空 (BYE)，则主队直接高亮自动保送至 1/4 决赛 (QF)
+                if (fix.slot2 === 'BYE') {
+                    nodes[n1Id].winner = true;
+                    nodes[n2Id].winner = false;
+                    
+                    // 保送 QF 节点
+                    const parentId = nodes[n1Id].parent;
+                    nodes[parentId].team = fix.slot1;
+                }
+            });
+
+            renderBracket();
+        }
+
+        // 获取匹配对战的兄弟节点
+        function getSiblingId(nodeId) {
+            const parentId = nodes[nodeId].parent;
+            if (!parentId) return null;
+            for (let id in nodes) {
+                if (nodes[id].parent === parentId && id !== nodeId) {
+                    return id;
+                }
+            }
+            return null;
+        }
+
+        // 递归清空受到更改影响的全部后裔数据
+        function clearDownstream(nodeId) {
+            const parentId = nodes[nodeId].parent;
+            if (!parentId) return;
+
+            const parentNode = nodes[parentId];
+            parentNode.team = null;
+            parentNode.winner = false;
+
+            clearDownstream(parentId);
+        }
+
+        // 核心决胜晋级交互逻辑
+        function handleAdvancement(nodeId) {
+            const node = nodes[nodeId];
+            if (!node.team || node.team === 'BYE') {
+                showNotify("⏳ 轮空位或无队伍席位，请勿操作！");
+                return;
+            }
+
+            // 处理决赛选手夺得最终总冠军
+            if (nodeId === 'L_F' || nodeId === 'R_F') {
+                saveStateToHistory();
+                clearDownstream(nodeId);
+                nodes['CHAMPION'].team = node.team;
+                nodes['L_F'].winner = (nodeId === 'L_F');
+                nodes['R_F'].winner = (nodeId === 'R_F');
+                
+                showNotify(`🎉 恭喜！【${node.team}】在您的预测模拟中成功斩获终极总冠军！🏆`);
+                renderBracket();
+                return;
+            }
+
+            // 总冠军神坛不可点击
+            if (nodeId === 'CHAMPION') return;
+
+            // 基础对局晋级行为
+            const siblingId = getSiblingId(nodeId);
+            const siblingNode = nodes[siblingId];
+
+            if (!siblingNode.team) {
+                showNotify("⏳ 对局中另一支队伍暂未晋级产生，无法裁决！");
+                return;
+            }
+
+            const parentId = node.parent;
+            const parentNode = nodes[parentId];
+
+            if (parentNode.team !== node.team) {
+                saveStateToHistory();
+                clearDownstream(nodeId);
+                parentNode.team = node.team;
+                node.winner = true;
+                siblingNode.winner = false;
+                showNotify(`👉 【${node.team}】击败【${siblingNode.team}】成功晋级！`);
+                renderBracket();
+            }
+        }
+
+        // 呼出队名自定义修改弹窗
+        function openRenameModal(nodeId) {
+            currentlyEditingNode = nodeId;
+            const node = nodes[nodeId];
+            const modal = document.getElementById('rename-modal');
+            const card = document.getElementById('modal-card');
+            const input = document.getElementById('rename-input');
+
+            input.value = node.team || '';
+            modal.classList.remove('opacity-0', 'pointer-events-none');
+            card.classList.remove('scale-95');
+            card.classList.add('scale-100');
+            
+            setTimeout(() => input.select(), 100);
+        }
+
+        // 关闭自定义重命名弹窗
+        function closeRenameModal() {
+            const modal = document.getElementById('rename-modal');
+            const card = document.getElementById('modal-card');
+            
+            modal.classList.add('opacity-0', 'pointer-events-none');
+            card.classList.add('scale-95');
+            card.classList.remove('scale-100');
+            currentlyEditingNode = null;
+        }
+
+        // 保存新的球队重命名
+        function saveNewTeamName() {
+            if (!currentlyEditingNode) return;
+            const input = document.getElementById('rename-input');
+            const newName = input.value.trim();
+
+            if (newName) {
+                const node = nodes[currentlyEditingNode];
+                if (node.team !== newName) {
+                    saveStateToHistory();
+                    clearDownstream(currentlyEditingNode);
+                    node.team = newName;
+                    node.winner = false;
+
+                    const sibId = getSiblingId(currentlyEditingNode);
+                    if (sibId) {
+                        nodes[sibId].winner = false;
+                        // 如果改名后其对手是 BYE，必须强制重新自动保送
+                        if (nodes[sibId].team === 'BYE') {
+                            node.winner = true;
+                            nodes[nodes[currentlyEditingNode].parent].team = newName;
+                        }
+                    }
+
+                    showNotify(`✏️ 重命名为【${newName}】，相关的后续下游晋级已被清空重置。`);
+                }
+                closeRenameModal();
+                renderBracket();
+            }
+        }
+
+        // 重新渲染绘制整个晋级树状节点样式
+        function renderBracket() {
+            for (let id in nodes) {
+                const node = nodes[id];
+                const elem = document.querySelector(`[data-node-id="${id}"]`);
+                if (!elem) continue;
+
+                elem.className = "team-card";
+
+                if (id === 'CHAMPION') {
+                    elem.className = "w-36 h-20 rounded-2xl flex flex-col justify-center items-center border border-slate-800 bg-slate-950 transition-all duration-300 text-center px-2";
+                    if (node.team) {
+                        elem.innerHTML = `
+                            <span class="text-amber-400 font-black text-sm drop-shadow">🏆 ${node.team}</span>
+                            <span class="text-[10px] text-amber-500/80 font-bold tracking-wider mt-1 animate-pulse">CHAMPION</span>
+                        `;
+                        elem.classList.add('champion-glow');
+                    } else {
+                        elem.innerHTML = `<span class="text-slate-600 text-xs italic">等待最终决胜...</span>`;
+                        elem.classList.remove('champion-glow');
+                    }
+                    continue;
+                }
+
+                const siblingId = getSiblingId(id);
+                const siblingNode = siblingId ? nodes[siblingId] : null;
+
+                if (!node.team) {
+                    elem.innerText = "待定";
+                    elem.classList.add('card-tbd');
+                } else if (node.team === 'BYE') {
+                    elem.innerText = "BYE (轮空)";
+                    elem.classList.add('card-bye');
+                } else {
+                    elem.innerText = node.team;
+                    if (node.winner) {
+                        elem.classList.add('card-winner');
+                    } else if (siblingNode && siblingNode.winner) {
+                        elem.classList.add('card-eliminated');
+                    }
+                }
+            }
+
+            setTimeout(drawLines, 50);
+        }
+
+        // 动态绘制正交 SVG 连线，高亮晋级路线
+        function drawLines() {
+            const container = document.getElementById('bracket-container');
+            const svg = document.getElementById('bracket-lines');
+            if (!container || !svg) return;
+
+            svg.innerHTML = ''; 
+            const rectContainer = container.getBoundingClientRect();
+
+            // 1. 遍历前1/8和1/4的连线对并绘图
+            matchups.forEach(m => {
+                const c1 = document.getElementById(m.c1);
+                const c2 = document.getElementById(m.c2);
+                const p = document.getElementById(m.p);
+
+                if (!c1 || !c2 || !p) return;
+
+                const r1 = c1.getBoundingClientRect();
+                const r2 = c2.getBoundingClientRect();
+                const rp = p.getBoundingClientRect();
+
+                const n1 = nodes[m.c1];
+                const n2 = nodes[m.c2];
+
+                let color1 = n1.winner ? '#10b981' : (n2.winner ? '#1e293b' : '#334155');
+                let color2 = n2.winner ? '#10b981' : (n1.winner ? '#1e293b' : '#334155');
+                let colorP = (n1.winner || n2.winner) ? '#10b981' : '#334155';
+
+                let width1 = n1.winner ? 3.0 : 1.5;
+                let width2 = n2.winner ? 3.0 : 1.5;
+                let widthP = (n1.winner || n2.winner) ? 3.0 : 1.5;
+
+                let x1, y1, x2, y2, px, py, mx;
+
+                if (m.side === 'left') {
+                    x1 = r1.right - rectContainer.left;
+                    y1 = (r1.top + r1.bottom) / 2 - rectContainer.top;
+
+                    x2 = r2.right - rectContainer.left;
+                    y2 = (r2.top + r2.bottom) / 2 - rectContainer.top;
+
+                    px = rp.left - rectContainer.left;
+                    py = (rp.top + rp.bottom) / 2 - rectContainer.top;
+
+                    mx = x1 + (px - x1) * 0.5;
+                } else {
+                    x1 = r1.left - rectContainer.left;
+                    y1 = (r1.top + r1.bottom) / 2 - rectContainer.top;
+
+                    x2 = r2.left - rectContainer.left;
+                    y2 = (r2.top + r2.bottom) / 2 - rectContainer.top;
+
+                    px = rp.right - rectContainer.left;
+                    py = (rp.top + rp.bottom) / 2 - rectContainer.top;
+
+                    mx = x1 - (x1 - px) * 0.5;
+                }
+
+                createSVGPath(svg, `M ${x1} ${y1} H ${mx} V ${py}`, color1, width1);
+                createSVGPath(svg, `M ${x2} ${y2} H ${mx} V ${py}`, color2, width2);
+                createSVGPath(svg, `M ${mx} ${py} H ${px}`, colorP, widthP);
+            });
+
+            // 2. 绘制半决赛到决赛的中央聚合线路 (L_F & R_F -> CHAMPION)
+            drawFinalsConnection(rectContainer);
+        }
+
+        // 绘制总决赛到冠军座位的 SVG 连线
+        function drawFinalsConnection(rectContainer) {
+            const svg = document.getElementById('bracket-lines');
+            const lf = document.getElementById('L_F');
+            const rf = document.getElementById('R_F');
+            const champ = document.getElementById('CHAMPION');
+
+            if (!lf || !rf || !champ) return;
+
+            const rLf = lf.getBoundingClientRect();
+            const rRf = rf.getBoundingClientRect();
+            const rCh = champ.getBoundingClientRect();
+
+            const nLf = nodes['L_F'];
+            const nRf = nodes['R_F'];
+
+            const xLf = (rLf.left + rLf.right) / 2 - rectContainer.left;
+            const yLf = rLf.top - rectContainer.top;
+
+            const xRf = (rRf.left + rRf.right) / 2 - rectContainer.left;
+            const yRf = rRf.top - rectContainer.top;
+
+            const xCh = (rCh.left + rCh.right) / 2 - rectContainer.left;
+            const yCh = rCh.bottom - rectContainer.top;
+
+            const midY = yCh + 35; 
+
+            let colorL = nLf.winner ? '#10b981' : (nRf.winner ? '#1e293b' : '#334155');
+            let colorR = nRf.winner ? '#10b981' : (nLf.winner ? '#1e293b' : '#334155');
+            let colorCh = (nLf.winner || nRf.winner) ? '#10b981' : '#334155';
+
+            let wL = nLf.winner ? 3.0 : 1.5;
+            let wR = nRf.winner ? 3.0 : 1.5;
+            let wCh = (nLf.winner || nRf.winner) ? 3.0 : 1.5;
+
+            // 绘制折线
+            createSVGPath(svg, `M ${xLf} ${yLf} V ${midY} H ${xCh}`, colorL, wL);
+            createSVGPath(svg, `M ${xRf} ${yRf} V ${midY} H ${xCh}`, colorR, wR);
+            createSVGPath(svg, `M ${xCh} ${midY} V ${yCh}`, colorCh, wCh);
+        }
+
+        // 创建 SVG 路径元素
+        function createSVGPath(svg, d, strokeColor, strokeWidth) {
+            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            path.setAttribute('d', d);
+            path.setAttribute('fill', 'none');
+            path.setAttribute('stroke', strokeColor);
+            path.setAttribute('stroke-width', strokeWidth);
+            path.setAttribute('stroke-linecap', 'round');
+            path.setAttribute('stroke-linejoin', 'round');
+            path.style.transition = 'stroke 0.2s ease, stroke-width 0.2s ease';
+            svg.appendChild(path);
+        }
+    </script>
+</body>
+</html>
