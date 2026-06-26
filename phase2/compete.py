@@ -676,10 +676,12 @@ def run_trial(
     ball = env.unwrapped.scene["ball"]
     raw_state_cache: dict[str, Any] = {"shooter": {}, "goalkeeper": {}, "ball": {}}
     goal_scored = False
+    goal_scored_at_step: int | None = None
     error: str | None = None
     steps = 0
     start_time = time.perf_counter()
     trial_start = start_time
+    post_goal_steps = max(1, int(round(1.0 / step_dt)))
     for _ in range(max_steps):
         try:
             with torch.inference_mode():
@@ -697,11 +699,14 @@ def run_trial(
         ball_pos = ball.data.root_link_pos_w[0].cpu()
         if _ball_entered_goal(ball_pos, config):
             goal_scored = True
+            if goal_scored_at_step is None:
+                goal_scored_at_step = steps
+        if goal_scored_at_step is not None and steps - goal_scored_at_step >= post_goal_steps:
             break
 
         terminated = result[2]
         terminated = bool(terminated.item()) if hasattr(terminated, "item") else bool(terminated)
-        if terminated:
+        if terminated and not goal_scored:
             break
 
         if realtime:
@@ -721,6 +726,7 @@ def run_trial(
         "trial": trial_index,
         "winner": winner,
         "goal_scored": goal_scored,
+        "goal_scored_at_step": goal_scored_at_step,
         "steps": steps,
         "elapsed_s": elapsed_total,
         "ball_final_pos": ball_pos.tolist(),
@@ -821,7 +827,7 @@ class CompeteConfig:
     shooter_team: str = "ShooterTeam"
     goalkeeper_team: str = "GoalkeeperTeam"
     match_id: str | None = None
-    num_trials: int = 10
+    num_trials: int = 5
     config_path: str = str(DEFAULT_CONFIG_PATH)
     results_json: str | None = None
     viser_host: str = "0.0.0.0"

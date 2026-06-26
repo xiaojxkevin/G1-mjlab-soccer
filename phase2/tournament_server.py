@@ -1,6 +1,7 @@
 """Web console for launching CS2810 Phase 2 matches."""
 
 import asyncio
+import csv
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from pydantic import BaseModel
 
 PHASE2_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PHASE2_DIR / "phase2_config.yaml"
+TEAM_INFO_PATH = PHASE2_DIR / "assets" / "Team-Info.csv"
 RESULT_DIR = PHASE2_DIR / "results"
 
 
@@ -40,12 +42,33 @@ def _timestamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
+def _load_team_options() -> list[dict[str, str]]:
+    options: list[dict[str, str]] = []
+    if not TEAM_INFO_PATH.exists():
+        return options
+    with TEAM_INFO_PATH.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            team_name = (row.get("Team name (optional)", "") or "").strip().rstrip(",")
+            shooter_api = (row.get("Shooter API", "") or "").strip()
+            goalkeeper_api = (row.get("GoalKeeper API", "") or "").strip()
+            if team_name:
+                if shooter_api:
+                    options.append({"team": team_name, "api": shooter_api})
+                if goalkeeper_api:
+                    options.append({"team": team_name, "api": goalkeeper_api})
+    return options
+
+
+TEAM_OPTIONS = _load_team_options()
+
+
 class MatchRequest(BaseModel):
     shooter_team: str
     shooter_api: str
     goalkeeper_team: str
     goalkeeper_api: str
-    num_trials: int = 10
+    num_trials: int = 5
     match_id: str | None = None
     viewer_enabled: bool = True
     save_video: bool = True
@@ -441,20 +464,66 @@ _INDEX_HTML = """
       <h2>Start Match</h2>
       <form id="match-form">
         <div class="grid">
-          <div><label>Shooter Team</label><input id="shooter_team" required></div>
-          <div><label>Shooter API URL</label><input id="shooter_api" required placeholder="http://host:port"></div>
-          <div><label>Goalkeeper Team</label><input id="goalkeeper_team" required></div>
-          <div><label>Goalkeeper API URL</label><input id="goalkeeper_api" required placeholder="http://host:port"></div>
+          <div><label>Shooter Team</label><input id="shooter_team" list="team-options" required></div>
+          <div><label>Shooter API URL</label><input id="shooter_api" list="api-options" required placeholder="http://host:port"></div>
+          <div><label>Goalkeeper Team</label><input id="goalkeeper_team" list="team-options" required></div>
+          <div><label>Goalkeeper API URL</label><input id="goalkeeper_api" list="api-options" required placeholder="http://host:port"></div>
         </div>
         <div class="row">
           <div><label>Match ID (optional)</label><input id="match_id"></div>
-          <div><label>Trials</label><input id="num_trials" type="number" min="1" value="10"></div>
+          <div><label>Trials</label><input id="num_trials" type="number" min="1" value="5"></div>
           <div class="toggle"><input id="viewer_enabled" type="checkbox" __VIEWER_CHECKED__><label for="viewer_enabled" style="margin:0;">Enable Viewer</label></div>
           <div class="toggle"><input id="save_video" type="checkbox" checked><label for="save_video" style="margin:0;">Save Video</label></div>
           <div><button type="submit" style="width:100%;">Start Match</button></div>
         </div>
         <div class="notes">Viewer controls the live Viser window; Save Video controls MP4 recording only.</div>
       </form>
+      <datalist id="team-options">
+        <option value="我爱吃海参"></option>
+        <option value="TeamWHY"></option>
+        <option value="Team3"></option>
+        <option value="T4"></option>
+        <option value="TEAM5"></option>
+        <option value="Team6"></option>
+        <option value="Team7"></option>
+        <option value="Kedox"></option>
+        <option value="Team9"></option>
+        <option value="Team10"></option>
+        <option value="G你太美"></option>
+        <option value="Team12"></option>
+        <option value="守不住的队发大财"></option>
+        <option value="Team14"></option>
+      </datalist>
+      <datalist id="api-options">
+        <option value="http://10.19.134.128:8000"></option>
+        <option value="http://10.19.130.49:18008"></option>
+        <option value="http://10.15.26.221:8000"></option>
+        <option value="http://10.15.26.221:8001"></option>
+        <option value="http://10.19.96.110:28888/shooter"></option>
+        <option value="http://10.19.96.110:28888/goalkeeper"></option>
+        <option value="http://10.20.103.143:8000"></option>
+        <option value="http://10.20.103.143:8001"></option>
+        <option value="http://10.15.26.224:8000"></option>
+        <option value="http://10.15.26.224:8001"></option>
+        <option value="http://10.20.248.12:8000"></option>
+        <option value="http://10.15.88.40:8002"></option>
+        <option value="http://10.15.88.43:19317"></option>
+        <option value="http://10.15.88.43:19318"></option>
+        <option value="http://10.19.127.7:8000/"></option>
+        <option value="http://10.19.127.7:8001/"></option>
+        <option value="http://10.15.88.88:22100"></option>
+        <option value="http://10.19.134.8:22101"></option>
+        <option value="http://10.20.203.183:7015"></option>
+        <option value="http://10.15.89.214:13579"></option>
+        <option value="http://10.19.134.128:18000"></option>
+        <option value="http://10.19.130.49:18001"></option>
+        <option value="http://10.19.125.145:8002"></option>
+        <option value="http://10.19.125.145:8001"></option>
+        <option value="http://10.15.112.224:8000"></option>
+        <option value="http://10.15.88.74:8001"></option>
+        <option value="http://10.20.199.5:8000"></option>
+        <option value="http://10.20.199.5:8001"></option>
+      </datalist>
     </section>
     <section>
       <h2>Matches</h2>
@@ -479,7 +548,7 @@ document.getElementById("match-form").addEventListener("submit", async (event) =
     shooter_api: document.getElementById("shooter_api").value,
     goalkeeper_team: document.getElementById("goalkeeper_team").value,
     goalkeeper_api: document.getElementById("goalkeeper_api").value,
-    num_trials: Number(document.getElementById("num_trials").value || 10),
+    num_trials: Number(document.getElementById("num_trials").value || 5),
     match_id: document.getElementById("match_id").value || null,
     viewer_enabled: document.getElementById("viewer_enabled").checked,
     save_video: document.getElementById("save_video").checked
@@ -503,8 +572,9 @@ async function refresh() {
     const summary = m.summary ? `goals=${m.summary.goals}, gk=${m.summary.goalkeeper_wins}, winner=${m.summary.winner_decision}` : "";
     const videosHtml = (m.video_paths && m.video_paths.length > 0)
       ? m.video_paths.map((v, i) => {
-          const name = v.split('/').pop();
-          return `<a href="/results/${v}" target="_blank"><button class="secondary" style="background:#7c3aed;" title="Trial ${i+1}">🎬 T${i+1}</button></a>`;
+          const url = `/results/${v}`;
+          const title = `${m.match_id} Trial ${i+1}`;
+          return `<button type="button" class="secondary" style="background:#7c3aed;" title="Trial ${i+1}" onclick="openVideoPopup('${url}', '${title}')">Play T${i+1}</button>`;
         }).join(' ')
       : "";
     tr.innerHTML = `
@@ -539,6 +609,126 @@ async function stopMatch(matchId) {
   await fetch(`/api/matches/${matchId}/stop`, {method: "POST"});
   await refresh();
 }
+const TEAM_TO_SHOOTER_API = new Map([
+  ["我爱吃海参", "http://10.19.134.128:8000"],
+  ["TeamWHY", "http://10.15.26.221:8000"],
+  ["Team3", "http://10.19.96.110:28888/shooter"],
+  ["T4", "http://10.20.103.143:8000"],
+  ["TEAM5", "http://10.15.26.224:8000"],
+  ["Team6", "http://10.20.248.12:8000"],
+  ["Team7", "http://10.15.88.43:19317"],
+  ["Kedox", "http://10.19.127.7:8000/"],
+  ["Team9", "http://10.15.88.88:22100"],
+  ["Team10", "http://10.20.203.183:7015"],
+  ["G你太美", "http://10.19.134.128:18000"],
+  ["Team12", "http://10.19.125.145:8002"],
+  ["守不住的队发大财", "http://10.15.112.224:8000"],
+  ["Team14", "http://10.20.199.5:8000"],
+]);
+const TEAM_TO_GOALKEEPER_API = new Map([
+  ["我爱吃海参", "http://10.19.130.49:18008"],
+  ["TeamWHY", "http://10.15.26.221:8001"],
+  ["Team3", "http://10.19.96.110:28888/goalkeeper"],
+  ["T4", "http://10.20.103.143:8001"],
+  ["TEAM5", "http://10.15.26.224:8001"],
+  ["Team6", "http://10.15.88.40:8002"],
+  ["Team7", "http://10.15.88.43:19318"],
+  ["Kedox", "http://10.19.127.7:8001/"],
+  ["Team9", "http://10.19.134.8:22101"],
+  ["Team10", "http://10.15.89.214:13579"],
+  ["G你太美", "http://10.19.130.49:18001"],
+  ["Team12", "http://10.19.125.145:8001"],
+  ["守不住的队发大财", "http://10.15.88.74:8001"],
+  ["Team14", "http://10.20.199.5:8001"],
+]);
+const SHOOTER_API_TO_TEAM = new Map([
+  ["http://10.19.134.128:8000", "我爱吃海参"],
+  ["http://10.15.26.221:8000", "TeamWHY"],
+  ["http://10.19.96.110:28888/shooter", "Team3"],
+  ["http://10.20.103.143:8000", "T4"],
+  ["http://10.15.26.224:8000", "TEAM5"],
+  ["http://10.20.248.12:8000", "Team6"],
+  ["http://10.15.88.43:19317", "Team7"],
+  ["http://10.19.127.7:8000/", "Kedox"],
+  ["http://10.15.88.88:22100", "Team9"],
+  ["http://10.20.203.183:7015", "Team10"],
+  ["http://10.19.134.128:18000", "G你太美"],
+  ["http://10.19.125.145:8002", "Team12"],
+  ["http://10.15.112.224:8000", "守不住的队发大财"],
+  ["http://10.20.199.5:8000", "Team14"],
+]);
+const GOALKEEPER_API_TO_TEAM = new Map([
+  ["http://10.19.130.49:18008", "我爱吃海参"],
+  ["http://10.15.26.221:8001", "TeamWHY"],
+  ["http://10.19.96.110:28888/goalkeeper", "Team3"],
+  ["http://10.20.103.143:8001", "T4"],
+  ["http://10.15.26.224:8001", "TEAM5"],
+  ["http://10.15.88.40:8002", "Team6"],
+  ["http://10.15.88.43:19318", "Team7"],
+  ["http://10.19.127.7:8001/", "Kedox"],
+  ["http://10.19.134.8:22101", "Team9"],
+  ["http://10.15.89.214:13579", "Team10"],
+  ["http://10.19.130.49:18001", "G你太美"],
+  ["http://10.19.125.145:8001", "Team12"],
+  ["http://10.15.88.74:8001", "守不住的队发大财"],
+  ["http://10.20.199.5:8001", "Team14"],
+]);
+
+function syncTeamToApi(teamInputId, apiInputId, role) {
+  const team = (document.getElementById(teamInputId).value || "").trim();
+  const apiEl = document.getElementById(apiInputId);
+  const mapping = role === "goalkeeper" ? TEAM_TO_GOALKEEPER_API : TEAM_TO_SHOOTER_API;
+  if (mapping.has(team)) apiEl.value = mapping.get(team);
+}
+
+function syncApiToTeam(apiInputId, teamInputId, role) {
+  const api = (document.getElementById(apiInputId).value || "").trim();
+  const teamEl = document.getElementById(teamInputId);
+  const mapping = role === "goalkeeper" ? GOALKEEPER_API_TO_TEAM : SHOOTER_API_TO_TEAM;
+  if (mapping.has(api)) teamEl.value = mapping.get(api);
+}
+
+for (const [teamId, apiId, role] of [["shooter_team", "shooter_api", "shooter"], ["goalkeeper_team", "goalkeeper_api", "goalkeeper"]]) {
+  document.getElementById(teamId).addEventListener("change", () => syncTeamToApi(teamId, apiId, role));
+  document.getElementById(teamId).addEventListener("blur", () => syncTeamToApi(teamId, apiId, role));
+  document.getElementById(apiId).addEventListener("change", () => syncApiToTeam(apiId, teamId, role));
+  document.getElementById(apiId).addEventListener("blur", () => syncApiToTeam(apiId, teamId, role));
+}
+
+function openVideoPopup(url, title) {
+  const width = 760;
+  const height = 540;
+  const left = Math.max(0, Math.round((window.screen.availWidth - width) / 2));
+  const top = Math.max(0, Math.round((window.screen.availHeight - height) / 2));
+  const popup = window.open("", `video_${Date.now()}`, `width=${width},height=${height},left=${left},top=${top}`);
+  if (!popup) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  popup.document.open();
+  popup.document.write(`
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>${title}</title>
+      <style>
+        html, body { margin: 0; width: 100%; height: 100%; background: #0f172a; color: #e5e7eb; font-family: system-ui, sans-serif; }
+        body { display: flex; flex-direction: column; }
+        .bar { padding: 10px 12px; font-size: 13px; background: #111827; border-bottom: 1px solid #334155; }
+        video { width: 100%; height: calc(100% - 42px); background: black; }
+      </style>
+    </head>
+    <body>
+      <div class="bar">${title}</div>
+      <video controls autoplay src="${url}"></video>
+    </body>
+    </html>
+  `);
+  popup.document.close();
+}
+
 
 refresh();
 setInterval(refresh, 2000);

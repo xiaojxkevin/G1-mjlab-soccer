@@ -162,12 +162,18 @@
                     <span class="animate-bounce">💡</span>
                     <span>操作指南：<strong>鼠标单击</strong>高亮队伍卡片决定其晋级；<strong>双击</strong>最外侧首轮队伍卡片可<strong>自定义修改队名</strong>。</span>
                 </div>
-                <!-- 带有 Seed 复制控制面板的辅助区 -->
+                <!-- 带有 Seed 复制控制面板与人工奖项选择的辅助区 -->
                 <div class="flex flex-wrap items-center gap-3">
                     <div class="bg-slate-950/80 border border-slate-800 rounded-xl px-3 py-1.5 text-[11px] font-mono text-slate-400 flex items-center gap-2">
                         <span>对局 Seed:</span>
                         <span id="active-seed-display" class="font-black text-indigo-400">--------</span>
                         <button onclick="copyActiveSeed()" class="hover:text-white transition bg-slate-800 hover:bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded text-[10px] font-sans font-semibold">📋 复制</button>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2 bg-slate-950/80 border border-slate-800 rounded-xl px-3 py-2 text-[11px] text-slate-400">
+                        <label for="best-shooter-select" class="font-black text-amber-400 tracking-wider">Best Shooter</label>
+                        <select id="best-shooter-select" onchange="setAward('bestShooter', this.value)" class="bg-slate-900 border border-slate-700 text-slate-100 rounded-lg px-2 py-1 focus:outline-none focus:border-amber-500 min-w-28"></select>
+                        <label for="best-goalkeeper-select" class="font-black text-emerald-400 tracking-wider ml-1">Best Goalkeeper</label>
+                        <select id="best-goalkeeper-select" onchange="setAward('bestGoalkeeper', this.value)" class="bg-slate-900 border border-slate-700 text-slate-100 rounded-lg px-2 py-1 focus:outline-none focus:border-emerald-500 min-w-28"></select>
                     </div>
                     <div class="text-[10px] bg-slate-800 text-slate-400 px-2 py-1.5 rounded-lg border border-slate-700">
                         注：带 (BYE) 的比赛队伍已由于轮空规则自动保送8强
@@ -476,6 +482,10 @@
         // Seed 状态管理与可复现伪随机数生成器 (Mulberry32)
         let currentSeed = "";
         let prng = Math.random;
+        let awards = {
+            bestShooter: "",
+            bestGoalkeeper: ""
+        };
 
         // Cyrb128 哈希算法：用于将任何字符串转化为 32 位整型种子
         function cyrb128(str) {
@@ -557,6 +567,7 @@
         window.addEventListener('DOMContentLoaded', () => {
             renderTiers();
             initEvents();
+            renderAwardSelectors();
             
             // 自动配置初始随机种子并模拟开局
             const initialSeed = generateRandomSeed();
@@ -652,7 +663,7 @@
 
         // 存储节点快照便于撤回
         function saveStateToHistory() {
-            history.push(JSON.parse(JSON.stringify(nodes)));
+            history.push(JSON.parse(JSON.stringify({ nodes, awards })));
             updateUndoButtonState();
         }
 
@@ -669,9 +680,16 @@
         // 触发撤销操作
         function undoAction() {
             if (history.length > 0) {
-                nodes = history.pop();
+                const previous = history.pop();
+                if (previous.nodes) {
+                    nodes = previous.nodes;
+                    awards = previous.awards || { bestShooter: "", bestGoalkeeper: "" };
+                } else {
+                    nodes = previous;
+                }
                 updateUndoButtonState();
                 showNotify("↩️ 操作已撤销。");
+                renderAwardSelectors();
                 renderBracket();
             } else {
                 showNotify("💡 没有可撤销的历史步骤。");
@@ -817,6 +835,7 @@
                 }
             });
 
+            renderAwardSelectors();
             renderBracket();
         }
 
@@ -891,6 +910,50 @@
             }
         }
 
+        // 获取当前可被人工评奖的队伍名称
+        function getAwardTeamNames() {
+            const names = [];
+            const seen = new Set();
+            Object.values(nodes).forEach(node => {
+                if (!node.team || node.team === 'BYE' || seen.has(node.team)) return;
+                seen.add(node.team);
+                names.push(node.team);
+            });
+            return names.sort((a, b) => a.localeCompare(b, 'zh-CN'));
+        }
+
+        // 渲染 Best Shooter / Best Goalkeeper 人工选择项
+        function renderAwardSelectors() {
+            const teams = getAwardTeamNames();
+            const configs = [
+                { id: 'best-shooter-select', key: 'bestShooter' },
+                { id: 'best-goalkeeper-select', key: 'bestGoalkeeper' }
+            ];
+            configs.forEach(config => {
+                const select = document.getElementById(config.id);
+                if (!select) return;
+                const current = awards[config.key];
+                select.innerHTML = '<option value="">未选择</option>' + teams.map(team => {
+                    const selected = team === current ? ' selected' : '';
+                    return `<option value="${team}"${selected}>${team}</option>`;
+                }).join('');
+                if (current && !teams.includes(current)) {
+                    awards[config.key] = '';
+                    select.value = '';
+                }
+            });
+        }
+
+        // 人工设置最佳射手/最佳守门员
+        function setAward(key, value) {
+            if (awards[key] === value) return;
+            saveStateToHistory();
+            awards[key] = value;
+            renderAwardSelectors();
+            const label = key === 'bestShooter' ? 'Best Shooter' : 'Best Goalkeeper';
+            showNotify(value ? `🏅 ${label} 已设为【${value}】` : `🏅 ${label} 已清空`);
+        }
+
         // 呼出队名自定义修改弹窗
         function openRenameModal(nodeId) {
             currentlyEditingNode = nodeId;
@@ -945,6 +1008,7 @@
                     showNotify(`✏️ 重命名为【${newName}】，相关的后续下游晋级已被清空重置。`);
                 }
                 closeRenameModal();
+                renderAwardSelectors();
                 renderBracket();
             }
         }
@@ -992,6 +1056,7 @@
                 }
             }
 
+            renderAwardSelectors();
             setTimeout(drawLines, 50);
         }
 
