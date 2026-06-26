@@ -387,6 +387,25 @@
 
     <!-- 核心逻辑控制 JavaScript -->
     <script>
+        // --- Team colour map (consistent with compete.py and tournament_server.py) ---
+        const TEAM_COLORS = new Map([
+            ["我爱吃海参", "#D93636"],
+            ["TeamWHY",   "#D97E36"],
+            ["Team3",     "#BFA92E"],
+            ["T4",        "#80BF2E"],
+            ["TEAM5",     "#36BF4A"],
+            ["Team6",     "#2EBF73"],
+            ["Team7",     "#2EBF9E"],
+            ["Kedox",     "#2E9EBF"],
+            ["Team9",     "#3673D9"],
+            ["Team10",    "#4B36D9"],
+            ["G你太美",   "#8036D9"],
+            ["Team12",    "#BF36BF"],
+            ["守不住的队发大财", "#D936AE"],
+            ["Team14",    "#D93666"],
+        ]);
+        function teamColorHex(name) { return TEAM_COLORS.get(name) || "#666672"; }
+
         // 定义您上传的文件中所列出的14支队伍真实数据
         const initialTiers = {
             tier1: [
@@ -617,9 +636,12 @@
                 if (!el) continue;
                 el.innerHTML = '';
                 config.data.forEach(team => {
+                    const color = teamColorHex(team.name);
                     el.innerHTML += `
                         <div class="flex items-center justify-between p-2.5 rounded-xl border ${config.colorClass}">
-                            <span class="font-bold text-slate-200">${team.name}</span>
+                            <span class="font-bold text-slate-200">
+                                <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color};margin-right:6px;vertical-align:middle;"></span>${team.name}
+                            </span>
                             <span class="text-[10px] bg-slate-950/40 px-2 py-0.5 rounded-md text-slate-400 font-mono">${team.score} 积分</span>
                         </div>
                     `;
@@ -1025,6 +1047,8 @@
                 if (id === 'CHAMPION') {
                     elem.className = "w-36 h-20 rounded-2xl flex flex-col justify-center items-center border border-slate-800 bg-slate-950 transition-all duration-300 text-center px-2";
                     if (node.team) {
+                        const champColor = teamColorHex(node.team);
+                        elem.style.borderColor = champColor;
                         elem.innerHTML = `
                             <span class="text-amber-400 font-black text-sm drop-shadow">🏆 ${node.team}</span>
                             <span class="text-[10px] text-amber-500/80 font-bold tracking-wider mt-1 animate-pulse">CHAMPION</span>
@@ -1047,6 +1071,8 @@
                     elem.innerText = "BYE (轮空)";
                     elem.classList.add('card-bye');
                 } else {
+                    const color = teamColorHex(node.team);
+                    elem.style.borderLeft = `3px solid ${color}`;
                     elem.innerText = node.team;
                     if (node.winner) {
                         elem.classList.add('card-winner');

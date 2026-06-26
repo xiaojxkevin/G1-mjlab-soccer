@@ -55,6 +55,64 @@ _SHOOTER_CFG = SceneEntityCfg("shooter")
 _GK_CFG = SceneEntityCfg("goalkeeper")
 _BALL_CFG = SceneEntityCfg("ball")
 
+# Team → (R, G, B) in 0-1 (viser) and hex (web). 14 evenly-spaced hues.
+_TEAM_COLOR_MAP: dict[str, tuple[float, float, float, str]] = {
+    "我爱吃海参": (0.851, 0.212, 0.212, "#D93636"),       # H=0    red
+    "TeamWHY": (0.851, 0.494, 0.212, "#D97E36"),         # H=26   orange
+    "Team3": (0.749, 0.663, 0.180, "#BFA92E"),           # H=51   gold
+    "T4": (0.502, 0.749, 0.180, "#80BF2E"),              # H=77   yellow-green
+    "TEAM5": (0.212, 0.749, 0.290, "#36BF4A"),           # H=103  green
+    "Team6": (0.180, 0.749, 0.451, "#2EBF73"),           # H=129  teal-green
+    "Team7": (0.180, 0.749, 0.620, "#2EBF9E"),           # H=154  teal
+    "Kedox": (0.180, 0.620, 0.749, "#2E9EBF"),           # H=180  cyan
+    "Team9": (0.212, 0.451, 0.851, "#3673D9"),           # H=206  blue
+    "Team10": (0.294, 0.212, 0.851, "#4B36D9"),          # H=231  indigo
+    "G你太美": (0.502, 0.212, 0.851, "#8036D9"),         # H=257  purple
+    "Team12": (0.749, 0.212, 0.749, "#BF36BF"),          # H=283  magenta
+    "守不住的队发大财": (0.851, 0.212, 0.682, "#D936AE"), # H=309  pink
+    "Team14": (0.851, 0.212, 0.400, "#D93666"),          # H=334  rose
+}
+_DEFAULT_TEAM_COLOR: tuple[float, float, float, str] = (0.40, 0.40, 0.45, "#666672")
+
+# Ordered team list for ID assignment (indices 1-14).
+_TEAM_ID_LIST: list[str] = [
+    "我爱吃海参",   # 1
+    "TeamWHY",       # 2
+    "Team3",         # 3
+    "T4",            # 4
+    "TEAM5",         # 5
+    "Team6",         # 6
+    "Team7",         # 7
+    "Kedox",         # 8
+    "Team9",         # 9
+    "Team10",        # 10
+    "G你太美",       # 11
+    "Team12",        # 12
+    "守不住的队发大财", # 13
+    "Team14",        # 14
+]
+_TEAM_NAME_TO_ID: dict[str, int] = {name: i + 1 for i, name in enumerate(_TEAM_ID_LIST)}
+
+
+def _team_display_name(name: str) -> str:
+    """Return a display-safe name (ID for Chinese, original for English)."""
+    tid = _TEAM_NAME_TO_ID.get(name)
+    if tid is not None:
+        return f"Team{tid}"
+    return name
+
+
+def _team_color_rgb(name: str) -> tuple[float, float, float]:
+    """Return (R, G, B) in 0-1 range for a team name, or default gray."""
+    entry = _TEAM_COLOR_MAP.get(name, _DEFAULT_TEAM_COLOR)
+    return (entry[0], entry[1], entry[2])
+
+
+def _team_color_hex(name: str) -> str:
+    """Return hex color string for a team name, or default gray."""
+    entry = _TEAM_COLOR_MAP.get(name, _DEFAULT_TEAM_COLOR)
+    return entry[3]
+
 
 def _load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as f:
@@ -471,6 +529,61 @@ class CombinedPolicy:
         self._prev_action_g.zero_()
 
 
+class _PenaltyCombinedPolicy:
+    """Combined policy for the penalty shootout Viser viewer.
+
+    On each call returns the concatenated actions of the currently active
+    shooter + goalkeeper pair.  Which pair is active is rotated by the
+    regulation schedule and then alternates for sudden death.
+    """
+
+    def __init__(
+        self,
+        regulation_schedule: list[tuple[int, str, str, Any, Any]],
+        policy_a_shooter: Any,
+        policy_a_goalkeeper: Any,
+        policy_b_shooter: Any,
+        policy_b_goalkeeper: Any,
+        env_base: ManagerBasedRlEnv,
+        device: str,
+    ):
+        self._regulation_schedule = regulation_schedule
+        self._policy_a_shooter = policy_a_shooter
+        self._policy_a_goalkeeper = policy_a_goalkeeper
+        self._policy_b_shooter = policy_b_shooter
+        self._policy_b_goalkeeper = policy_b_goalkeeper
+        self._env_base = env_base
+        self._device = device
+        self._prev_action_s = torch.zeros(1, 29, device=device)
+        self._prev_action_g = torch.zeros(1, 29, device=device)
+        self._raw_state_cache: dict[str, Any] = {"shooter": {}, "goalkeeper": {}, "ball": {}}
+        # Pick the first pair from regulation schedule for the viewer
+        self._active_shooter = regulation_schedule[0][3]
+        self._active_goalkeeper = regulation_schedule[0][4]
+        self._kick_counter = 0
+
+    def __call__(self, _obs: dict[str, Any]) -> torch.Tensor:
+        raw = _build_raw_state(
+            self._env_base,
+            self._prev_action_s,
+            self._prev_action_g,
+            self._raw_state_cache,
+        )
+        s_act = self._active_shooter(raw)
+        g_act = self._active_goalkeeper(raw)
+        self._prev_action_s = s_act.detach().clone()
+        self._prev_action_g = g_act.detach().clone()
+        return torch.cat([s_act, g_act], dim=-1)
+
+    def reset(self) -> None:
+        self._policy_a_shooter.reset()
+        self._policy_a_goalkeeper.reset()
+        self._policy_b_shooter.reset()
+        self._policy_b_goalkeeper.reset()
+        self._prev_action_s.zero_()
+        self._prev_action_g.zero_()
+
+
 class PassiveViserViewer(ViserPlayViewer):
     """Viser viewer that renders the environment without stepping physics."""
 
@@ -479,6 +592,8 @@ class PassiveViserViewer(ViserPlayViewer):
         *args: Any,
         scoreboard: "ScoreboardState | None" = None,
         start_event: threading.Event | None = None,
+        shooter_team_name: str = "",
+        goalkeeper_team_name: str = "",
         **kwargs: Any,
     ):
         super().__init__(*args, **kwargs)
@@ -488,6 +603,12 @@ class PassiveViserViewer(ViserPlayViewer):
         self._start_button = None
         self._render_interval_s = 1.0 / 24.0
         self._next_render_at = 0.0
+        self._shooter_team_name = shooter_team_name
+        self._goalkeeper_team_name = goalkeeper_team_name
+        self._disc_shooter: Any = None
+        self._disc_goalkeeper: Any = None
+        self._last_shooter_color: tuple[float, float, float] | None = None
+        self._last_gk_color: tuple[float, float, float] | None = None
 
     def setup(self) -> None:
         super().setup()
@@ -512,6 +633,27 @@ class PassiveViserViewer(ViserPlayViewer):
             _client.camera.position = _cam_pos
             _client.camera.look_at = _look_at
 
+        # --- Add coloured foot discs under each robot ---
+        # Use z=0.025 so the disc sits clearly above the ground plane and
+        # catches enough light to not render black.
+        default_rgb = _team_color_rgb("")
+        self._disc_shooter = self._server.scene.add_cylinder(
+            "shooter_foot_disc",
+            radius=0.35,
+            height=0.025,
+            color=default_rgb,
+            position=(0, 0, 0.025),
+            visible=True,
+        )
+        self._disc_goalkeeper = self._server.scene.add_cylinder(
+            "goalkeeper_foot_disc",
+            radius=0.35,
+            height=0.025,
+            color=default_rgb,
+            position=(0, 0, 0.025),
+            visible=True,
+        )
+
         if self._scoreboard is not None:
             import viser
 
@@ -535,6 +677,69 @@ class PassiveViserViewer(ViserPlayViewer):
                 self._scoreboard_html = self._server.gui.add_html("")
             self._update_scoreboard_display()
 
+    def _update_foot_discs(self) -> None:
+        """Update foot disc positions and colours from current robot state.
+
+        Viser handles don't support changing material colour after creation,
+        so we remove + re-add the cylinder when the colour changes.
+        """
+        # Access the root MuJoCo scene through the env chain.
+        # self.env is RslRlVecEnvWrapper → .unwrapped chains through
+        # _TimedVideoRecorder (if present) → ManagerBasedRlEnv.
+        env_unwrapped = self.env.unwrapped
+        scene = env_unwrapped.scene
+        s_pos = scene["shooter"].data.root_link_pos_w[0].cpu().numpy()
+        g_pos = scene["goalkeeper"].data.root_link_pos_w[0].cpu().numpy()
+
+        # Determine which team controls which entity.
+        shooter_color_team = self._shooter_team_name
+        gk_color_team = self._goalkeeper_team_name
+        if isinstance(self._scoreboard, PenaltyScoreboardState):
+            # Penalty mode: colours change per kick.
+            sd = self._scoreboard
+            shooting = sd.shooting_team
+            if shooting == sd.team_a_name:
+                shooter_color_team = sd.team_a_name
+                gk_color_team = sd.team_b_name
+            elif shooting == sd.team_b_name:
+                shooter_color_team = sd.team_b_name
+                gk_color_team = sd.team_a_name
+
+        new_shooter_rgb = _team_color_rgb(shooter_color_team)
+        new_gk_rgb = _team_color_rgb(gk_color_team)
+
+        # --- Shooter disc: recreate if colour changed ---
+        if new_shooter_rgb != self._last_shooter_color:
+            if self._disc_shooter is not None:
+                self._disc_shooter.remove()
+            self._disc_shooter = self._server.scene.add_cylinder(
+                "shooter_foot_disc",
+                radius=0.35,
+                height=0.025,
+                color=new_shooter_rgb,
+                position=(float(s_pos[0]), float(s_pos[1]), 0.025),
+                visible=True,
+            )
+            self._last_shooter_color = new_shooter_rgb
+        else:
+            self._disc_shooter.position = (float(s_pos[0]), float(s_pos[1]), 0.025)
+
+        # --- Goalkeeper disc: recreate if colour changed ---
+        if new_gk_rgb != self._last_gk_color:
+            if self._disc_goalkeeper is not None:
+                self._disc_goalkeeper.remove()
+            self._disc_goalkeeper = self._server.scene.add_cylinder(
+                "goalkeeper_foot_disc",
+                radius=0.35,
+                height=0.025,
+                color=new_gk_rgb,
+                position=(float(g_pos[0]), float(g_pos[1]), 0.025),
+                visible=True,
+            )
+            self._last_gk_color = new_gk_rgb
+        else:
+            self._disc_goalkeeper.position = (float(g_pos[0]), float(g_pos[1]), 0.025)
+
     def _step_physics(self, dt: float) -> None:
         del dt
         return
@@ -554,6 +759,7 @@ class PassiveViserViewer(ViserPlayViewer):
             return False
         rendered = super().tick()
         self._next_render_at = time.perf_counter() + self._render_interval_s
+        self._update_foot_discs()
         self._update_scoreboard_display()
         return rendered
 
@@ -606,14 +812,92 @@ class ScoreboardState:
                 "font-weight:700;background:#e5e7eb;'>-</span>"
             )
         current = current_trial if current_trial > 0 else "-"
+        s_name = _team_display_name(self.shooter_team)
+        g_name = _team_display_name(self.goalkeeper_team)
         return f"""
         <div style="font-size:0.9em;line-height:1.35;padding:0 1em 0.6em 1em;">
-          <strong>{self.shooter_team}</strong> vs <strong>{self.goalkeeper_team}</strong><br/>
+          <strong>{s_name}</strong> vs <strong>{g_name}</strong><br/>
           <strong>Current trial:</strong> {current}/{self.total_trials}<br/>
           <strong>Phase:</strong> {phase}<br/>
           <strong>Score:</strong> Shooter {shooter_wins} - {gk_wins} Goalkeeper<br/>
           <div style="margin-top:6px;">{''.join(symbols)}</div>
           <div style="color:#6b7280;margin-top:4px;">S = shooter goal, G = goalkeeper save</div>
+        </div>
+        """
+
+
+@dataclass
+class PenaltyScoreboardState:
+    """Scoreboard for penalty shootout matches displayed in the Viser viewer."""
+
+    team_a_name: str
+    team_b_name: str
+    score_a: int = 0
+    score_b: int = 0
+    current_kick: int = 0
+    total_kicks: int = 10
+    shooting_team: str = ""
+    phase: str = "initializing"
+    kick_results: list[str] = field(default_factory=list)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def set_phase(self, phase: str, current_kick: int | None = None) -> None:
+        with self.lock:
+            self.phase = phase
+            if current_kick is not None:
+                self.current_kick = current_kick
+
+    def record_kick(self, result: str) -> None:
+        with self.lock:
+            self.kick_results.append(result)
+
+    def snapshot(self) -> tuple[int, str, list[str]]:
+        with self.lock:
+            return self.current_kick, self.phase, list(self.kick_results)
+
+    def to_html(self) -> str:
+        current_kick, phase, results = self.snapshot()
+        symbols = []
+        for result in results:
+            if result == "goal":
+                color, label = "#16a34a", "G"
+            elif result == "save":
+                color, label = "#2563eb", "S"
+            else:
+                color, label = "#dc2626", "!"
+            symbols.append(
+                "<span style='display:inline-flex;align-items:center;justify-content:center;"
+                "width:22px;height:22px;border-radius:50%;margin:2px;color:white;"
+                f"font-weight:700;background:{color};'>{label}</span>"
+            )
+        for _ in range(max(0, self.total_kicks - len(results))):
+            symbols.append(
+                "<span style='display:inline-flex;align-items:center;justify-content:center;"
+                "width:22px;height:22px;border-radius:50%;margin:2px;color:#6b7280;"
+                "font-weight:700;background:#e5e7eb;'>-</span>"
+            )
+        # Show additional sudden-death circles when phase is sudden_death
+        if phase == "sudden_death":
+            for _ in range(4):
+                symbols.append(
+                    "<span style='display:inline-flex;align-items:center;justify-content:center;"
+                    "width:22px;height:22px;border-radius:50%;margin:2px;color:#6b7280;"
+                    "font-weight:700;background:#e5e7eb;'>?</span>"
+                )
+        current = current_kick if current_kick > 0 else "-"
+        shooting = self.shooting_team or "-"
+        shooting_display = _team_display_name(shooting)
+        total_display = f"{self.total_kicks}+SD" if phase == "sudden_death" else str(self.total_kicks)
+        name_a = _team_display_name(self.team_a_name)
+        name_b = _team_display_name(self.team_b_name)
+        return f"""
+        <div style="font-size:0.9em;line-height:1.35;padding:0 1em 0.6em 1em;">
+          <strong>{name_a}</strong> vs <strong>{name_b}</strong><br/>
+          <strong>Score:</strong> {name_a} {self.score_a} - {self.score_b} {name_b}<br/>
+          <strong>Current kick:</strong> {current}/{total_display} &nbsp; <strong>Shooting:</strong> {shooting_display}<br/>
+          <strong>Phase:</strong> {phase}<br/>
+          <div style="margin-top:6px;">{''.join(symbols)}</div>
+          <div style="color:#6b7280;margin-top:4px;">G = goal scored, S = goalkeeper save</div>
         </div>
         """
 
@@ -626,6 +910,34 @@ def _ball_entered_goal(ball_pos: torch.Tensor, config: dict[str, Any]) -> bool:
         and abs(y) <= float(goal["half_width"])
         and z <= float(goal["height"])
     )
+
+
+def _rename_last_video(
+    video_folder: Path,
+    video_recorder: _TimedVideoRecorder,
+    kick_idx: int,
+    shooting_team: str,
+    keeping_team: str,
+    is_sudden_death: bool = False,
+) -> Path | None:
+    """Wait for the last video write to finish, then rename it with kick metadata."""
+    video_recorder.wait_for_writes()
+    existing = sorted(video_folder.glob("*.mp4"))
+    if not existing:
+        return None
+    latest = existing[-1]
+    phase = "sd" if is_sudden_death else "reg"
+    # Use team display names (Team1..Team14) for filename safety.
+    s_disp = _team_display_name(shooting_team).replace(" ", "")
+    k_disp = _team_display_name(keeping_team).replace(" ", "")
+    new_name = (
+        f"kick_{kick_idx:02d}_{phase}_"
+        f"{s_disp}_shoots_"
+        f"{k_disp}_keeps.mp4"
+    )
+    new_path = latest.with_name(new_name)
+    latest.rename(new_path)
+    return new_path
 
 
 def _minimal_config_audit(config: dict[str, Any], max_steps: int) -> dict[str, Any]:
@@ -734,6 +1046,547 @@ def run_trial(
     }
 
 
+def run_penalty_kick(
+    kick_index: int,
+    shooting_team: str,
+    keeping_team: str,
+    env: RslRlVecEnvWrapper,
+    env_base: ManagerBasedRlEnv,
+    active_shooter_policy: Any,
+    active_goalkeeper_policy: Any,
+    config: dict[str, Any],
+    max_steps: int,
+    step_dt: float,
+    realtime: bool,
+    scoreboard: PenaltyScoreboardState | None = None,
+) -> dict[str, Any]:
+    """Run a single penalty kick: one shooter vs one goalkeeper."""
+    if scoreboard is not None:
+        scoreboard.set_phase("running", kick_index)
+        scoreboard.shooting_team = shooting_team
+    env.reset()
+    active_shooter_policy.reset()
+    active_goalkeeper_policy.reset()
+
+    device = env.unwrapped.device
+    prev_action_s = torch.zeros(1, 29, device=device)
+    prev_action_g = torch.zeros(1, 29, device=device)
+    ball = env.unwrapped.scene["ball"]
+    raw_state_cache: dict[str, Any] = {"shooter": {}, "goalkeeper": {}, "ball": {}}
+    goal_scored = False
+    goal_scored_at_step: int | None = None
+    error: str | None = None
+    steps = 0
+    start_time = time.perf_counter()
+    kick_start = start_time
+    post_goal_steps = max(1, int(round(1.0 / step_dt)))
+    for _ in range(max_steps):
+        try:
+            with torch.inference_mode():
+                raw = _build_raw_state(env_base, prev_action_s, prev_action_g, raw_state_cache)
+                s_act, g_act = _call_policies_parallel(
+                    active_shooter_policy, active_goalkeeper_policy, raw
+                )
+        except Exception as exc:
+            error = str(exc)
+            break
+
+        result = env.step(torch.cat([s_act, g_act], dim=-1))
+        steps += 1
+        prev_action_s = s_act.detach().clone()
+        prev_action_g = g_act.detach().clone()
+
+        ball_pos = ball.data.root_link_pos_w[0].cpu()
+        if _ball_entered_goal(ball_pos, config):
+            goal_scored = True
+            if goal_scored_at_step is None:
+                goal_scored_at_step = steps
+        if goal_scored_at_step is not None and steps - goal_scored_at_step >= post_goal_steps:
+            break
+
+        terminated = result[2]
+        terminated = bool(terminated.item()) if hasattr(terminated, "item") else bool(terminated)
+        if terminated and not goal_scored:
+            break
+
+        if realtime:
+            target_time = start_time + steps * step_dt
+            sleep_time = target_time - time.perf_counter()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+    elapsed_total = time.perf_counter() - kick_start
+    kick_result = "goal" if goal_scored else "save"
+    if error is not None:
+        kick_result = "error"
+    if scoreboard is not None:
+        if goal_scored:
+            scoreboard.record_kick("goal")
+        elif error:
+            scoreboard.record_kick("error")
+        else:
+            scoreboard.record_kick("save")
+    ball_pos = ball.data.root_link_pos_w[0].cpu()
+    return {
+        "kick": kick_index,
+        "shooting_team": shooting_team,
+        "keeping_team": keeping_team,
+        "goal_scored": goal_scored,
+        "goal_scored_at_step": goal_scored_at_step,
+        "steps": steps,
+        "elapsed_s": elapsed_total,
+        "ball_final_pos": ball_pos.tolist(),
+        "error": error,
+    }
+
+
+def run_penalty_shootout(
+    cfg: "CompeteConfig",
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Run a full penalty shootout between two teams."""
+    timestamp = _utc_timestamp()
+
+    # --- Validate config ---
+    missing = []
+    for field_name in [
+        "team_a_name", "team_a_shooter_api", "team_a_goalkeeper_api",
+        "team_b_name", "team_b_shooter_api", "team_b_goalkeeper_api",
+    ]:
+        if getattr(cfg, field_name) is None:
+            missing.append(field_name)
+    if missing:
+        raise ValueError(f"Penalty shootout requires: {', '.join(missing)}")
+
+    # --- Match identity ---
+    if cfg.match_id:
+        match_id = cfg.match_id
+    else:
+        match_id = (
+            f"{timestamp}_"
+            f"{_sanitize(cfg.team_a_name)}_vs_"
+            f"{_sanitize(cfg.team_b_name)}_penalty"
+        )
+    match_dir = DEFAULT_RESULTS_DIR / match_id
+    match_dir.mkdir(parents=True, exist_ok=True)
+    result_path = Path(cfg.results_json) if cfg.results_json else (match_dir / "result.json")
+
+    device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+    step_dt = float(config["sim"]["timestep"]) * int(config["sim"]["decimation"])
+    max_steps = int(round(float(config["episode_length_s"]) / step_dt))
+
+    print(f"[INFO] Match id: {match_id}", flush=True)
+    print(f"[INFO] Mode: penalty_shootout", flush=True)
+    print(f"[INFO] Device: {device}", flush=True)
+    print(f"[INFO] Viser: http://{cfg.viser_host}:{cfg.viser_port}", flush=True)
+
+    # --- Build env ---
+    env_cfg = make_compete_env_cfg(config)
+    render_mode = "rgb_array" if cfg.save_video else None
+    env_base_raw = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
+    if cfg.save_video:
+        env_base_raw._offline_renderer.close()
+        env_base_raw._offline_renderer = None
+    act_dim_shooter = env_base_raw.action_manager.get_term("shooter_joint_pos").action_dim
+    act_dim_goalkeeper = env_base_raw.action_manager.get_term("goalkeeper_joint_pos").action_dim
+
+    # --- Video recording ---
+    video_folder = match_dir / "videos"
+    env_base = env_base_raw
+    if cfg.save_video:
+        video_folder.mkdir(parents=True, exist_ok=True)
+        print(f"[INFO] Video recording: {video_folder}", flush=True)
+    else:
+        print("[INFO] Video recording disabled.", flush=True)
+
+    if cfg.no_viewer:
+        cfg.realtime = False
+
+    try:
+        # --- Create 4 ApiPolicies ---
+        policy_a_shooter: Any = (
+            ApiPolicy(cfg.team_a_shooter_api, act_dim_shooter, device, cfg.request_timeout)
+            if cfg.team_a_shooter_api
+            else ZeroPolicy(act_dim_shooter, device)
+        )
+        policy_a_goalkeeper: Any = (
+            ApiPolicy(cfg.team_a_goalkeeper_api, act_dim_goalkeeper, device, cfg.request_timeout)
+            if cfg.team_a_goalkeeper_api
+            else ZeroPolicy(act_dim_goalkeeper, device)
+        )
+        policy_b_shooter: Any = (
+            ApiPolicy(cfg.team_b_shooter_api, act_dim_shooter, device, cfg.request_timeout)
+            if cfg.team_b_shooter_api
+            else ZeroPolicy(act_dim_shooter, device)
+        )
+        policy_b_goalkeeper: Any = (
+            ApiPolicy(cfg.team_b_goalkeeper_api, act_dim_goalkeeper, device, cfg.request_timeout)
+            if cfg.team_b_goalkeeper_api
+            else ZeroPolicy(act_dim_goalkeeper, device)
+        )
+
+        # --- Wrap env ---
+        result_holder: dict[str, Any] = {}
+        video_recorder: _TimedVideoRecorder | None = None
+        if cfg.save_video:
+            video_recorder = _TimedVideoRecorder(
+                env_base_raw,
+                video_folder=video_folder,
+                episode_trigger=lambda ep: True,
+                video_length=None,
+                disable_logger=True,
+                step_dt=step_dt,
+                capture_fps=24.0,
+            )
+            env_base = video_recorder
+        env = RslRlVecEnvWrapper(env_base, clip_actions=100.0)
+
+        done_event = threading.Event()
+        start_event = threading.Event()
+        scoreboard = PenaltyScoreboardState(
+            team_a_name=cfg.team_a_name,
+            team_b_name=cfg.team_b_name,
+            total_kicks=10,
+        )
+
+        # --- Pre-define kick schedule for regulation ---
+        # Kick 1,3,5,7,9: team_a shoots, team_b keeps
+        # Kick 2,4,6,8,10: team_b shoots, team_a keeps
+        regulation_schedule: list[tuple[int, str, str, Any, Any]] = []
+        for i in range(5):
+            ki = i * 2 + 1
+            regulation_schedule.append(
+                (ki, cfg.team_a_name, cfg.team_b_name, policy_a_shooter, policy_b_goalkeeper)
+            )
+            ki = i * 2 + 2
+            regulation_schedule.append(
+                (ki, cfg.team_b_name, cfg.team_a_name, policy_b_shooter, policy_a_goalkeeper)
+            )
+
+        def _worker() -> None:
+            from mjlab.viewer import OffscreenRenderer
+
+            if cfg.save_video:
+                env_base_raw._offline_renderer = OffscreenRenderer(
+                    model=env_base_raw.sim.mj_model,
+                    cfg=env_base_raw.cfg.viewer,
+                    scene=env_base_raw.scene,
+                )
+                env_base_raw._offline_renderer.initialize()
+            try:
+                wait_for_start(
+                    start_event,
+                    None,
+                    auto_start=cfg.no_viewer,
+                )
+                if scoreboard is not None:
+                    scoreboard.set_phase("regulation", 1)
+
+                # --- Regulation kicks ---
+                score_a = 0
+                score_b = 0
+                regulation_results: list[dict[str, Any]] = []
+                sudden_death_results: list[dict[str, Any]] = []
+                total_errors = 0
+                kick_video_map: dict[int, str] = {}
+
+                for kick_idx, shooting, keeping, s_pol, g_pol in regulation_schedule:
+                    if scoreboard is not None:
+                        scoreboard.score_a = score_a
+                        scoreboard.score_b = score_b
+                    stats = run_penalty_kick(
+                        kick_idx, shooting, keeping,
+                        env, env_base, s_pol, g_pol,
+                        config, max_steps, step_dt, cfg.realtime,
+                        scoreboard,
+                    )
+                    regulation_results.append(stats)
+                    if stats["goal_scored"]:
+                        if shooting == cfg.team_a_name:
+                            score_a += 1
+                        else:
+                            score_b += 1
+                    if stats["error"]:
+                        total_errors += 1
+                    result_str = "GOAL" if stats["goal_scored"] else "SAVE"
+                    if stats["error"]:
+                        result_str = "ERROR"
+                    print(
+                        f"[KICK {kick_idx}/10] [{result_str}] {shooting} (shooter) vs {keeping} (keeper) "
+                        f"goal={stats['goal_scored']} steps={stats['steps']} "
+                        f"score={cfg.team_a_name} {score_a}-{score_b} {cfg.team_b_name}",
+                        flush=True,
+                    )
+                    if stats["error"]:
+                        print(f"[ERROR] Kick {kick_idx}: {stats['error']}", flush=True)
+                    if video_recorder is not None:
+                        video_recorder.finish_trial()
+                        renamed = _rename_last_video(
+                            video_folder, video_recorder,
+                            kick_idx, shooting, keeping,
+                        )
+                        if renamed is not None:
+                            kick_video_map[kick_idx] = f"{match_id}/videos/{renamed.name}"
+
+                # --- Sudden death ---
+                sd_kick_idx = 11
+                while (
+                    score_a == score_b
+                    and sd_kick_idx - 11 < cfg.max_sudden_death_rounds * 2
+                ):
+                    if scoreboard is not None:
+                        scoreboard.set_phase("sudden_death", sd_kick_idx)
+                        scoreboard.total_kicks = 10 + (sd_kick_idx - 11) + 1
+                        scoreboard.score_a = score_a
+                        scoreboard.score_b = score_b
+
+                    # Team A shoots first in sudden death
+                    stats_a = run_penalty_kick(
+                        sd_kick_idx,
+                        cfg.team_a_name, cfg.team_b_name,
+                        env, env_base, policy_a_shooter, policy_b_goalkeeper,
+                        config, max_steps, step_dt, cfg.realtime,
+                        scoreboard,
+                    )
+                    sudden_death_results.append(stats_a)
+                    if stats_a["goal_scored"]:
+                        score_a += 1
+                    if stats_a["error"]:
+                        total_errors += 1
+                    result_str_a = "GOAL" if stats_a["goal_scored"] else "SAVE"
+                    print(
+                        f"[SD KICK {sd_kick_idx}] [{result_str_a}] {cfg.team_a_name} (shooter) vs {cfg.team_b_name} (keeper) "
+                        f"goal={stats_a['goal_scored']} "
+                        f"score={cfg.team_a_name} {score_a}-{score_b} {cfg.team_b_name}",
+                        flush=True,
+                    )
+                    if video_recorder is not None:
+                        video_recorder.finish_trial()
+                        renamed = _rename_last_video(
+                            video_folder, video_recorder,
+                            sd_kick_idx, cfg.team_a_name, cfg.team_b_name,
+                            is_sudden_death=True,
+                        )
+                        if renamed is not None:
+                            kick_video_map[sd_kick_idx] = f"{match_id}/videos/{renamed.name}"
+                    sd_kick_idx += 1
+
+                    # Team B shoots
+                    stats_b = run_penalty_kick(
+                        sd_kick_idx,
+                        cfg.team_b_name, cfg.team_a_name,
+                        env, env_base, policy_b_shooter, policy_a_goalkeeper,
+                        config, max_steps, step_dt, cfg.realtime,
+                        scoreboard,
+                    )
+                    sudden_death_results.append(stats_b)
+                    if stats_b["goal_scored"]:
+                        score_b += 1
+                    if stats_b["error"]:
+                        total_errors += 1
+                    result_str_b = "GOAL" if stats_b["goal_scored"] else "SAVE"
+                    print(
+                        f"[SD KICK {sd_kick_idx}] [{result_str_b}] {cfg.team_b_name} (shooter) vs {cfg.team_a_name} (keeper) "
+                        f"goal={stats_b['goal_scored']} "
+                        f"score={cfg.team_a_name} {score_a}-{score_b} {cfg.team_b_name}",
+                        flush=True,
+                    )
+                    if video_recorder is not None:
+                        video_recorder.finish_trial()
+                        renamed = _rename_last_video(
+                            video_folder, video_recorder,
+                            sd_kick_idx, cfg.team_b_name, cfg.team_a_name,
+                            is_sudden_death=True,
+                        )
+                        if renamed is not None:
+                            kick_video_map[sd_kick_idx] = f"{match_id}/videos/{renamed.name}"
+                    sd_kick_idx += 1
+
+                    # Check for winner after each pair
+                    if score_a != score_b:
+                        break
+
+                # --- Determine winner ---
+                if score_a > score_b:
+                    winner = cfg.team_a_name
+                elif score_b > score_a:
+                    winner = cfg.team_b_name
+                else:
+                    winner = "draw"
+
+                summary = {
+                    "winner": winner,
+                    "score_a": score_a,
+                    "score_b": score_b,
+                    "regulation_kicks": len(regulation_results),
+                    "sudden_death_kicks": len(sudden_death_results),
+                    "errors": total_errors,
+                }
+                result_holder["summary"] = summary
+                result_holder["trials"] = regulation_results
+                result_holder["sudden_death_trials"] = sudden_death_results
+                result_holder["score"] = {
+                    cfg.team_a_name: score_a,
+                    cfg.team_b_name: score_b,
+                }
+                result_holder["kick_video_map"] = kick_video_map
+                print(f"[SUMMARY] {summary}", flush=True)
+                if scoreboard is not None:
+                    scoreboard.set_phase("finished")
+                    scoreboard.score_a = score_a
+                    scoreboard.score_b = score_b
+            except Exception as exc:
+                result_holder["summary"] = {
+                    "winner": "error",
+                    "score_a": 0,
+                    "score_b": 0,
+                    "regulation_kicks": 0,
+                    "sudden_death_kicks": 0,
+                    "errors": 10,
+                }
+                result_holder["trials"] = []
+                result_holder["sudden_death_trials"] = []
+                result_holder["score"] = {}
+                result_holder["fatal_error"] = str(exc)
+                print(f"[FATAL] {exc}", flush=True)
+            finally:
+                try:
+                    if cfg.save_video and env_base_raw._offline_renderer is not None:
+                        env_base_raw._offline_renderer.close()
+                        env_base_raw._offline_renderer = None
+                except Exception:
+                    pass
+                if "summary" not in result_holder:
+                    if scoreboard is not None:
+                        scoreboard.set_phase("failed")
+                done_event.set()
+
+        worker = threading.Thread(target=_worker, name="phase2-penalty", daemon=True)
+        worker.start()
+
+        # --- Viewer ---
+        if not cfg.no_viewer:
+            try:
+                import viser
+
+                server = viser.ViserServer(host=cfg.viser_host, port=cfg.viser_port, label="phase2")
+                # Use a CombinedPolicy-like wrapper that dynamically picks the
+                # correct pair of policies based on the current kick.
+                combined = _PenaltyCombinedPolicy(
+                    regulation_schedule,
+                    policy_a_shooter, policy_a_goalkeeper,
+                    policy_b_shooter, policy_b_goalkeeper,
+                    env_base, device,
+                )
+                viewer = PassiveViserViewer(
+                    env,
+                    combined,
+                    viser_server=server,
+                    scoreboard=scoreboard,
+                    start_event=start_event,
+                    shooter_team_name=cfg.team_a_name or "",
+                    goalkeeper_team_name=cfg.team_b_name or "",
+                )
+                viewer.setup()
+                try:
+                    while viewer.is_running() and not done_event.is_set():
+                        if not viewer.tick():
+                            continue
+                        viewer._update_stats()
+                finally:
+                    viewer.close()
+            except TypeError:
+                print(
+                    "[WARN] ViserServer host/port signature mismatch; "
+                    "running without viewer.",
+                    flush=True,
+                )
+                start_event.set()
+                done_event.wait()
+        else:
+            done_event.wait()
+
+        worker.join(timeout=5.0)
+        if cfg.save_video and video_recorder is not None:
+            video_recorder.wait_for_writes()
+        video_paths: list[str] = []
+        if cfg.save_video:
+            video_paths = sorted(
+                f"{match_id}/videos/{p.name}"
+                for p in video_folder.glob("*.mp4")
+            )
+        payload = {
+            "timestamp": timestamp,
+            "match_id": match_id,
+            "mode": "penalty_shootout",
+            "teams": {
+                "team_a": {
+                    "name": cfg.team_a_name,
+                    "shooter_api": cfg.team_a_shooter_api,
+                    "goalkeeper_api": cfg.team_a_goalkeeper_api,
+                },
+                "team_b": {
+                    "name": cfg.team_b_name,
+                    "shooter_api": cfg.team_b_shooter_api,
+                    "goalkeeper_api": cfg.team_b_goalkeeper_api,
+                },
+            },
+            "minimal_config_audit": _minimal_config_audit(config, max_steps),
+            "videos": video_paths,
+            **result_holder,
+        }
+        _write_result(result_path, payload)
+        return payload
+    except Exception as exc:
+        try:
+            video_paths_err: list[str] = []
+            if cfg.save_video:
+                video_paths_err = sorted(
+                    f"{match_id}/videos/{p.name}"
+                    for p in video_folder.glob("*.mp4")
+                )
+        except Exception:
+            video_paths_err = []
+        payload = {
+            "timestamp": timestamp,
+            "match_id": match_id,
+            "mode": "penalty_shootout",
+            "teams": {
+                "team_a": {
+                    "name": cfg.team_a_name,
+                    "shooter_api": cfg.team_a_shooter_api,
+                    "goalkeeper_api": cfg.team_a_goalkeeper_api,
+                },
+                "team_b": {
+                    "name": cfg.team_b_name,
+                    "shooter_api": cfg.team_b_shooter_api,
+                    "goalkeeper_api": cfg.team_b_goalkeeper_api,
+                },
+            },
+            "minimal_config_audit": _minimal_config_audit(config, max_steps),
+            "videos": video_paths_err,
+            "summary": {
+                "winner": "error",
+                "score_a": 0,
+                "score_b": 0,
+                "regulation_kicks": 0,
+                "sudden_death_kicks": 0,
+                "errors": 10,
+            },
+            "trials": [],
+            "sudden_death_trials": [],
+            "score": {},
+            "fatal_error": str(exc),
+        }
+        _write_result(result_path, payload)
+        raise
+    finally:
+        try:
+            env_base.close()
+        except Exception:
+            pass
+
+
 def run_match(
     cfg: "CompeteConfig",
     config: dict[str, Any],
@@ -822,12 +1675,9 @@ def _write_result(path: Path, payload: dict[str, Any]) -> None:
 
 @dataclass
 class CompeteConfig:
-    shooter_api: str | None = None
-    goalkeeper_api: str | None = None
-    shooter_team: str = "ShooterTeam"
-    goalkeeper_team: str = "GoalkeeperTeam"
+    # --- Shared fields ---
+    mode: str = "compete"               # "compete" | "penalty_shootout"
     match_id: str | None = None
-    num_trials: int = 5
     config_path: str = str(DEFAULT_CONFIG_PATH)
     results_json: str | None = None
     viser_host: str = "0.0.0.0"
@@ -838,6 +1688,22 @@ class CompeteConfig:
     realtime: bool = True
     device: str | None = None
     seed: int = 2810
+
+    # --- Compete-mode fields ---
+    shooter_api: str | None = None
+    goalkeeper_api: str | None = None
+    shooter_team: str = "ShooterTeam"
+    goalkeeper_team: str = "GoalkeeperTeam"
+    num_trials: int = 5
+
+    # --- Penalty-shootout fields ---
+    team_a_name: str | None = None
+    team_a_shooter_api: str | None = None
+    team_a_goalkeeper_api: str | None = None
+    team_b_name: str | None = None
+    team_b_shooter_api: str | None = None
+    team_b_goalkeeper_api: str | None = None
+    max_sudden_death_rounds: int = 5
 
 
 def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
@@ -850,6 +1716,11 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
     torch.manual_seed(cfg.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(cfg.seed)
+
+    # --- Penalty shootout mode: delegate to dedicated orchestrator ---
+    if cfg.mode == "penalty_shootout":
+        config = _load_config(cfg.config_path)
+        return run_penalty_shootout(cfg, config)
 
     config = _load_config(cfg.config_path)
     device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -1006,6 +1877,8 @@ def run_compete(cfg: CompeteConfig) -> dict[str, Any]:
                     viser_server=server,
                     scoreboard=scoreboard,
                     start_event=start_event,
+                    shooter_team_name=cfg.shooter_team or "",
+                    goalkeeper_team_name=cfg.goalkeeper_team or "",
                 )
                 viewer.setup()
                 try:

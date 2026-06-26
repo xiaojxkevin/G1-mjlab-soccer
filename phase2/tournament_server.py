@@ -74,6 +74,18 @@ class MatchRequest(BaseModel):
     save_video: bool = True
 
 
+class PenaltyShootoutRequest(BaseModel):
+    team_a_name: str
+    team_a_shooter_api: str
+    team_a_goalkeeper_api: str
+    team_b_name: str
+    team_b_shooter_api: str
+    team_b_goalkeeper_api: str
+    match_id: str | None = None
+    viewer_enabled: bool = True
+    save_video: bool = True
+
+
 @dataclass
 class Slot:
     name: str
@@ -105,10 +117,19 @@ class Match:
     viewer_enabled: bool = True
     save_video: bool = True
     error: str | None = None
+    # Penalty shootout fields
+    match_type: str = "compete"          # "compete" | "penalty_shootout"
+    team_a_name: str | None = None
+    team_a_shooter_api: str | None = None
+    team_a_goalkeeper_api: str | None = None
+    team_b_name: str | None = None
+    team_b_shooter_api: str | None = None
+    team_b_goalkeeper_api: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "match_id": self.match_id,
+            "match_type": self.match_type,
             "shooter_team": self.shooter_team,
             "shooter_api": self.shooter_api,
             "goalkeeper_team": self.goalkeeper_team,
@@ -130,6 +151,14 @@ class Match:
             "save_video": self.save_video,
             "error": self.error,
         }
+        if self.match_type == "penalty_shootout":
+            result["team_a_name"] = self.team_a_name
+            result["team_a_shooter_api"] = self.team_a_shooter_api
+            result["team_a_goalkeeper_api"] = self.team_a_goalkeeper_api
+            result["team_b_name"] = self.team_b_name
+            result["team_b_shooter_api"] = self.team_b_shooter_api
+            result["team_b_goalkeeper_api"] = self.team_b_goalkeeper_api
+        return result
 
 
 class MatchManager:
@@ -161,6 +190,56 @@ class MatchManager:
             unique = f"{candidate}_{suffix}"
             suffix += 1
         return unique
+
+    def _make_penalty_match_id(self, req: PenaltyShootoutRequest) -> str:
+        if req.match_id:
+            base = req.match_id
+        else:
+            base = f"{req.team_a_name}_vs_{req.team_b_name}_penalty"
+        candidate = f"{_timestamp()}_{_sanitize(base)}"
+        suffix = 2
+        unique = candidate
+        while unique in self.matches:
+            unique = f"{candidate}_{suffix}"
+            suffix += 1
+        return unique
+
+    async def create_penalty_shootout(self, req: PenaltyShootoutRequest) -> Match:
+        missing = []
+        for field_name in [
+            "team_a_name", "team_a_shooter_api", "team_a_goalkeeper_api",
+            "team_b_name", "team_b_shooter_api", "team_b_goalkeeper_api",
+        ]:
+            if not getattr(req, field_name, None):
+                missing.append(field_name)
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Penalty shootout requires: {', '.join(missing)}",
+            )
+        async with self.lock:
+            match_id = self._make_penalty_match_id(req)
+            match = Match(
+                match_id=match_id,
+                match_type="penalty_shootout",
+                team_a_name=req.team_a_name,
+                team_a_shooter_api=req.team_a_shooter_api,
+                team_a_goalkeeper_api=req.team_a_goalkeeper_api,
+                team_b_name=req.team_b_name,
+                team_b_shooter_api=req.team_b_shooter_api,
+                team_b_goalkeeper_api=req.team_b_goalkeeper_api,
+                shooter_team=req.team_a_name,
+                shooter_api=req.team_a_shooter_api,
+                goalkeeper_team=req.team_b_name,
+                goalkeeper_api=req.team_b_goalkeeper_api,
+                num_trials=1,
+                viewer_enabled=req.viewer_enabled,
+                save_video=req.save_video,
+            )
+            self.matches[match_id] = match
+            self.queue.append(match_id)
+            await self._schedule_locked()
+            return match
 
     def _free_slot(self) -> Slot | None:
         for slot in self.slots:
@@ -238,30 +317,49 @@ class MatchManager:
         match.log_path = str(log_path)
         match.result_path = str(result_path)
 
-        cmd = [
-            sys.executable,
-            str(PHASE2_DIR / "compete.py"),
-            "--shooter-api",
-            match.shooter_api,
-            "--goalkeeper-api",
-            match.goalkeeper_api,
-            "--shooter-team",
-            match.shooter_team,
-            "--goalkeeper-team",
-            match.goalkeeper_team,
-            "--match-id",
-            match.match_id,
-            "--num-trials",
-            str(match.num_trials),
-            "--config-path",
-            str(CONFIG_PATH),
-            "--results-json",
-            str(result_path),
-            "--viser-host",
-            "0.0.0.0",
-            "--viser-port",
-            str(slot.port),
-        ]
+        cmd: list[str]
+        if match.match_type == "penalty_shootout":
+            cmd = [
+                sys.executable,
+                str(PHASE2_DIR / "compete.py"),
+                "--mode", "penalty_shootout",
+                "--team-a-name", match.team_a_name or match.shooter_team,
+                "--team-a-shooter-api", match.team_a_shooter_api or match.shooter_api,
+                "--team-a-goalkeeper-api", match.team_a_goalkeeper_api or "",
+                "--team-b-name", match.team_b_name or match.goalkeeper_team,
+                "--team-b-shooter-api", match.team_b_shooter_api or "",
+                "--team-b-goalkeeper-api", match.team_b_goalkeeper_api or match.goalkeeper_api,
+                "--match-id", match.match_id,
+                "--config-path", str(CONFIG_PATH),
+                "--results-json", str(result_path),
+                "--viser-host", "0.0.0.0",
+                "--viser-port", str(slot.port),
+            ]
+        else:
+            cmd = [
+                sys.executable,
+                str(PHASE2_DIR / "compete.py"),
+                "--shooter-api",
+                match.shooter_api,
+                "--goalkeeper-api",
+                match.goalkeeper_api,
+                "--shooter-team",
+                match.shooter_team,
+                "--goalkeeper-team",
+                match.goalkeeper_team,
+                "--match-id",
+                match.match_id,
+                "--num-trials",
+                str(match.num_trials),
+                "--config-path",
+                str(CONFIG_PATH),
+                "--results-json",
+                str(result_path),
+                "--viser-host",
+                "0.0.0.0",
+                "--viser-port",
+                str(slot.port),
+            ]
         if not match.viewer_enabled:
             cmd.append("--no-viewer")
         if not match.save_video:
@@ -310,7 +408,19 @@ class MatchManager:
             return
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            match.summary = data.get("summary")
+            if match.match_type == "penalty_shootout":
+                summary = data.get("summary", {})
+                score = data.get("score", {})
+                match.summary = {
+                    "winner": summary.get("winner"),
+                    "score_a": summary.get("score_a"),
+                    "score_b": summary.get("score_b"),
+                    "regulation_kicks": summary.get("regulation_kicks"),
+                    "sudden_death_kicks": summary.get("sudden_death_kicks"),
+                    "score_detail": score,
+                }
+            else:
+                match.summary = data.get("summary")
             match.video_paths = data.get("videos")
             match.error = data.get("fatal_error")
         except Exception as exc:
@@ -371,6 +481,11 @@ def create_app(config: dict[str, Any]) -> FastAPI:
     @app.post("/api/matches")
     async def create_match(req: MatchRequest) -> dict[str, Any]:
         match = await manager.create_match(req)
+        return match.as_dict()
+
+    @app.post("/api/penalty-shootout")
+    async def create_penalty_shootout(req: PenaltyShootoutRequest) -> dict[str, Any]:
+        match = await manager.create_penalty_shootout(req)
         return match.as_dict()
 
     @app.get("/api/matches")
@@ -526,6 +641,27 @@ _INDEX_HTML = """
       </datalist>
     </section>
     <section>
+      <h2>⚽ Start Penalty Shootout</h2>
+      <form id="penalty-form">
+        <div class="grid">
+          <div><label>Team A Name</label><input id="pk_team_a_name" list="team-options" required></div>
+          <div><label>Team A Shooter API</label><input id="pk_team_a_shooter_api" list="api-options" required placeholder="http://host:port"></div>
+          <div><label>Team A Goalkeeper API</label><input id="pk_team_a_goalkeeper_api" list="api-options" required placeholder="http://host:port"></div>
+          <div><label>Team B Name</label><input id="pk_team_b_name" list="team-options" required></div>
+          <div><label>Team B Shooter API</label><input id="pk_team_b_shooter_api" list="api-options" required placeholder="http://host:port"></div>
+          <div><label>Team B Goalkeeper API</label><input id="pk_team_b_goalkeeper_api" list="api-options" required placeholder="http://host:port"></div>
+        </div>
+        <div class="row">
+          <div><label>Match ID (optional)</label><input id="pk_match_id"></div>
+          <div class="field-span"></div>
+          <div class="toggle"><input id="pk_viewer_enabled" type="checkbox" checked><label for="pk_viewer_enabled" style="margin:0;">Enable Viewer</label></div>
+          <div class="toggle"><input id="pk_save_video" type="checkbox" checked><label for="pk_save_video" style="margin:0;">Save Video</label></div>
+          <div><button type="submit" style="width:100%;background:#7c3aed;">⚽ Start Penalty Shootout</button></div>
+        </div>
+        <div class="notes">10 regulation kicks (5 per team, alternating), then sudden death if tied. Each team provides both a shooter and a goalkeeper API.</div>
+      </form>
+    </section>
+    <section>
       <h2>Matches</h2>
       <table>
         <thead><tr><th>Status</th><th>Match</th><th>APIs</th><th>Viser</th><th>Summary</th><th>Actions</th></tr></thead>
@@ -562,6 +698,47 @@ document.getElementById("match-form").addEventListener("submit", async (event) =
   await refresh();
 });
 
+document.getElementById("penalty-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const body = {
+    team_a_name: document.getElementById("pk_team_a_name").value,
+    team_a_shooter_api: document.getElementById("pk_team_a_shooter_api").value,
+    team_a_goalkeeper_api: document.getElementById("pk_team_a_goalkeeper_api").value,
+    team_b_name: document.getElementById("pk_team_b_name").value,
+    team_b_shooter_api: document.getElementById("pk_team_b_shooter_api").value,
+    team_b_goalkeeper_api: document.getElementById("pk_team_b_goalkeeper_api").value,
+    match_id: document.getElementById("pk_match_id").value || null,
+    viewer_enabled: document.getElementById("pk_viewer_enabled").checked,
+    save_video: document.getElementById("pk_save_video").checked
+  };
+  const resp = await fetch("/api/penalty-shootout", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) alert(await resp.text());
+  await refresh();
+});
+
+// Auto-fill both shooter AND goalkeeper APIs for penalty shootout teams
+function syncPenaltyTeamToApis(teamInputId, shooterApiId, goalkeeperApiId) {
+  const team = (document.getElementById(teamInputId).value || "").trim();
+  const shooterEl = document.getElementById(shooterApiId);
+  const gkEl = document.getElementById(goalkeeperApiId);
+  // source: TEAM_TO_SHOOTER_API and TEAM_TO_GOALKEEPER_API maps (defined below)
+  if (TEAM_TO_SHOOTER_API.has(team)) shooterEl.value = TEAM_TO_SHOOTER_API.get(team);
+  if (TEAM_TO_GOALKEEPER_API.has(team)) gkEl.value = TEAM_TO_GOALKEEPER_API.get(team);
+}
+
+// Wire up penalty auto-fill for Team A and Team B
+for (const [teamId, shooterId, gkId] of [
+  ["pk_team_a_name", "pk_team_a_shooter_api", "pk_team_a_goalkeeper_api"],
+  ["pk_team_b_name", "pk_team_b_shooter_api", "pk_team_b_goalkeeper_api"],
+]) {
+  document.getElementById(teamId).addEventListener("change", () => syncPenaltyTeamToApis(teamId, shooterId, gkId));
+  document.getElementById(teamId).addEventListener("blur", () => syncPenaltyTeamToApis(teamId, shooterId, gkId));
+}
+
 async function refresh() {
   const resp = await fetch("/api/matches");
   const matches = await resp.json();
@@ -569,18 +746,56 @@ async function refresh() {
   tbody.innerHTML = "";
   for (const m of matches) {
     const tr = document.createElement("tr");
-    const summary = m.summary ? `goals=${m.summary.goals}, gk=${m.summary.goalkeeper_wins}, winner=${m.summary.winner_decision}` : "";
+    const isPenalty = m.match_type === "penalty_shootout";
+    let summary = "";
+    if (m.summary) {
+      if (isPenalty) {
+        const sd = m.summary;
+        const teamA = m.team_a_name || m.shooter_team;
+        const teamB = m.team_b_name || m.goalkeeper_team;
+        const scoreA = sd.score_a !== undefined ? sd.score_a : "-";
+        const scoreB = sd.score_b !== undefined ? sd.score_b : "-";
+        summary = `${teamDot(teamA)}${teamA} ${scoreA} - ${scoreB} ${teamB}${teamDot(teamB)}, winner=${sd.winner}, reg=${sd.regulation_kicks}${sd.sudden_death_kicks ? "+SD"+sd.sudden_death_kicks : ""}`;
+      } else {
+        summary = m.summary ? `${teamDot(m.shooter_team)}goals=${m.summary.goals}, gk=${m.summary.goalkeeper_wins}, winner=${m.summary.winner_decision}${teamDot(m.goalkeeper_team)}` : "";
+      }
+    }
     const videosHtml = (m.video_paths && m.video_paths.length > 0)
       ? m.video_paths.map((v, i) => {
           const url = `/results/${v}`;
-          const title = `${m.match_id} Trial ${i+1}`;
-          return `<button type="button" class="secondary" style="background:#7c3aed;" title="Trial ${i+1}" onclick="openVideoPopup('${url}', '${title}')">Play T${i+1}</button>`;
+          // Parse descriptive penalty video filenames:
+          //  kick_01_reg_TeamAlpha_shoots_TeamBeta_keeps.mp4
+          //  kick_11_sd_TeamBeta_shoots_TeamAlpha_keeps.mp4
+          const fname = v.split("/").pop() || "";
+          let label;
+          if (fname.startsWith("kick_")) {
+            const parts = fname.replace(".mp4", "").split("_");
+            const kNum = parts[1] || "";
+            const phase = parts[2] === "sd" ? "SD" : "Reg";
+            const shooter = parts[3] || "";
+            const keeper = parts[5] || "";  // parts[4]="shoots", parts[5]=keeper, parts[6]="keeps"
+            const shortShooter = shooter.length > 8 ? shooter.substring(0, 7) + "…" : shooter;
+            const isReg = parts.length > 2 && parts[2] === "reg";
+            label = `⚽ K${kNum}: ${shortShooter}→${keeper.substring(0, 8)}${isReg ? "" : " SD"}`;
+          } else {
+            // Standard compete-mode video naming
+            label = `Trial ${i + 1}`;
+          }
+          const title = `${m.match_id} — ${label}`;
+          return `<button type="button" class="secondary" style="background:#7c3aed;" title="${title}" onclick="openVideoPopup('${url}', '${title}')">${label}</button>`;
         }).join(' ')
       : "";
+    const typeBadge = isPenalty ? `<span class="pill" style="background:#7c3aed;color:white;font-size:10px;margin-right:4px;">PK</span>` : "";
+    const matchDesc = isPenalty
+      ? `${teamDot(m.team_a_name || m.shooter_team)}${m.team_a_name || m.shooter_team} vs ${teamDot(m.team_b_name || m.goalkeeper_team)}${m.team_b_name || m.goalkeeper_team}`
+      : `${teamDot(m.shooter_team)}${m.shooter_team} shooter vs ${teamDot(m.goalkeeper_team)}${m.goalkeeper_team} goalkeeper`;
+    const apiCell = isPenalty
+      ? `<code>${m.team_a_shooter_api || m.shooter_api}</code><br><code>${m.team_a_goalkeeper_api || ""}</code><br><code>${m.team_b_shooter_api || ""}</code><br><code>${m.team_b_goalkeeper_api || m.goalkeeper_api}</code>`
+      : `<code>${m.shooter_api}</code><br><code>${m.goalkeeper_api}</code>`;
     tr.innerHTML = `
-      <td><span class="pill ${m.status}">${m.status}</span></td>
-      <td><code>${m.match_id}</code><br>${m.shooter_team} shooter vs ${m.goalkeeper_team} goalkeeper</td>
-      <td><code>${m.shooter_api}</code><br><code>${m.goalkeeper_api}</code></td>
+      <td>${typeBadge}<span class="pill ${m.status}">${m.status}</span></td>
+      <td><code>${m.match_id}</code><br>${matchDesc}</td>
+      <td>${apiCell}</td>
       <td>${m.viser_url ? `<a href="${m.viser_url}" target="_blank">${m.viser_url}</a>` : ""}</td>
       <td>${summary}</td>
       <td>
@@ -609,6 +824,29 @@ async function stopMatch(matchId) {
   await fetch(`/api/matches/${matchId}/stop`, {method: "POST"});
   await refresh();
 }
+// --- Team colour map (same as compete.py _TEAM_COLOR_MAP) ---
+const TEAM_COLORS = new Map([
+  ["我爱吃海参", "#D93636"],
+  ["TeamWHY",   "#D97E36"],
+  ["Team3",     "#BFA92E"],
+  ["T4",        "#80BF2E"],
+  ["TEAM5",     "#36BF4A"],
+  ["Team6",     "#2EBF73"],
+  ["Team7",     "#2EBF9E"],
+  ["Kedox",     "#2E9EBF"],
+  ["Team9",     "#3673D9"],
+  ["Team10",    "#4B36D9"],
+  ["G你太美",   "#8036D9"],
+  ["Team12",    "#BF36BF"],
+  ["守不住的队发大财", "#D936AE"],
+  ["Team14",    "#D93666"],
+]);
+function teamColorHex(name) { return TEAM_COLORS.get(name) || "#666672"; }
+function teamDot(name) {
+  const c = teamColorHex(name);
+  return `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c};margin-right:4px;vertical-align:middle;" title="${name}"></span>`;
+}
+
 const TEAM_TO_SHOOTER_API = new Map([
   ["我爱吃海参", "http://10.19.134.128:8000"],
   ["TeamWHY", "http://10.15.26.221:8000"],
